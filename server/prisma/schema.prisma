@@ -1,0 +1,150 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum ContactStatus {
+  pending
+  in_call
+  sold
+  callback
+  refused
+}
+
+enum CallStatus {
+  dialing
+  ringing
+  connected
+  ended
+  failed
+  no_answer
+  busy
+}
+
+enum CallOutcome {
+  none
+  sold
+  refused
+  callback
+  no_answer
+}
+
+model Contact {
+  id         String        @id @default(cuid())
+  firstName  String
+  familyName String        @default("")
+  phone      String        @unique
+  status    ContactStatus @default(pending)
+  notes     String?
+  deletedAt DateTime?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  calls     Call[]
+}
+
+model Call {
+  id             String                @id @default(cuid())
+  contactId      String
+  contact        Contact               @relation(fields: [contactId], references: [id])
+  flowVersionId  String?
+  callFlow       CallFlow?             @relation(fields: [flowVersionId], references: [id])
+  status         CallStatus            @default(dialing)
+  outcome        CallOutcome           @default(none)
+  externalCallId String?
+  currentStage   String?
+  summary        String?
+  startedAt      DateTime              @default(now())
+  endedAt        DateTime?
+  durationSec    Int?
+  transcript     CallTranscriptSegment[]
+}
+
+model CallTranscriptSegment {
+  id        String   @id @default(cuid())
+  callId    String
+  call      Call     @relation(fields: [callId], references: [id], onDelete: Cascade)
+  speaker   String
+  text      String
+  timestamp DateTime @default(now())
+}
+
+model SalesPacket {
+  id              String   @id @default(cuid())
+  nameHe          String
+  descriptionHe   String
+  priceMonthly    Float
+  contractMonths  Int      @default(12)
+  active          Boolean  @default(true)
+  channelIds      String   @default("[]")
+  internetTierId  String?
+  phonePlanId     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model ChannelPackage {
+  id         String   @id @default(cuid())
+  nameHe     String
+  channels   String   @default("[]")
+  priceAddon Float    @default(0)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model InternetTier {
+  id           String   @id @default(cuid())
+  nameHe       String
+  downloadMbps Int
+  uploadMbps   Int
+  priceMonthly Float
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model PhonePlan {
+  id           String   @id @default(cuid())
+  nameHe       String
+  features     String   @default("[]")
+  priceMonthly Float
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model CallFlow {
+  id              String   @id @default(cuid())
+  version         Int      @default(1)
+  openingTemplate String
+  stagesJson      String
+  objectionsJson  String   @default("{}")
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  calls           Call[]
+}
+
+model AppSettings {
+  id              String   @id @default("default")
+  telephonyConfig String?
+  aiConfig        String?
+  updatedAt       DateTime @updatedAt
+}
+
+model ProductKnowledgeIndex {
+  id        String   @id @default("default")
+  dataJson  String
+  updatedAt DateTime @updatedAt
+}
+
+model YesCatalog {
+  id          String   @id @default("default")
+  catalogJson String
+  scannedAt   String?
+  importedAt  DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

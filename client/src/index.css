@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+body {
+  font-family: "Heebo", sans-serif;
+  direction: rtl;
+  background: #f8fafc;
+  color: #0f172a;
+}
