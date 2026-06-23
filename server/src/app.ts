@@ -4,6 +4,8 @@ import contactsRouter from "./routes/contacts.js";
 import callsRouter from "./routes/calls.js";
 import salesRouter from "./routes/sales.js";
 import callFlowsRouter from "./routes/callFlows.js";
+import catalogRouter from "./routes/catalog.js";
+import intentsRouter from "./routes/intents.js";
 import settingsRouter from "./routes/settings.js";
 import dashboardRouter from "./routes/dashboard.js";
 import webhooksRouter from "./routes/webhooks.js";
@@ -30,6 +32,8 @@ export function createApp() {
   app.use("/api/calls", callsRouter);
   app.use("/api/sales", salesRouter);
   app.use("/api/call-flows", callFlowsRouter);
+  app.use("/api/catalog", catalogRouter);
+  app.use("/api/intents", intentsRouter);
   app.use("/api/settings", settingsRouter);
   app.use("/api/dashboard", dashboardRouter);
   app.use("/api/webhooks", webhooksRouter);

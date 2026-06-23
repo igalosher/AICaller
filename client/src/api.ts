@@ -54,6 +54,31 @@ export const callFlowsApi = {
       .then((r) => r.data),
   save: (data: { openingTemplate: string; stages: unknown[]; objections: Record<string, string> }) =>
     api.post<CallFlow>("/call-flows", data).then((r) => r.data),
+  getGraph: (id: string) => api.get<import("./types").FlowGraph>(`/call-flows/${id}/graph`).then((r) => r.data),
+  saveGraph: (id: string, graph: import("./types").FlowGraph) =>
+    api.put<import("./types").FlowGraph>(`/call-flows/${id}/graph`, graph).then((r) => r.data),
+  publish: (id: string) => api.post<CallFlow>(`/call-flows/${id}/publish`).then((r) => r.data),
+  validate: (id: string) =>
+    api.post<{ errors: { messageHe: string }[] }>(`/call-flows/${id}/validate`).then((r) => r.data),
+  importLinear: (id: string) =>
+    api.post<import("./types").FlowGraph>(`/call-flows/${id}/import-linear`).then((r) => r.data),
+};
+
+export const intentsApi = {
+  list: () => api.get<import("./types").Intent[]>("/intents").then((r) => r.data),
+  update: (id: string, data: Partial<import("./types").Intent>) =>
+    api.put<import("./types").Intent>(`/intents/${id}`, data).then((r) => r.data),
+  addExample: (id: string, phrase: string) =>
+    api.post(`/intents/${id}/examples`, { phrase }).then((r) => r.data),
+  relabel: (segmentId: string, intentId: string, addAsExample = false) =>
+    api.post("/intents/relabel", { segmentId, intentId, addAsExample }).then((r) => r.data),
+};
+
+export const catalogApi = {
+  channels: () => api.get("/catalog/channels").then((r) => r.data),
+  channel: (id: string) => api.get(`/catalog/channels/${encodeURIComponent(id)}`).then((r) => r.data),
+  packetChannels: (name: string) =>
+    api.get(`/catalog/packets/${encodeURIComponent(name)}/channels`).then((r) => r.data),
 };
 
 export const settingsApi = {

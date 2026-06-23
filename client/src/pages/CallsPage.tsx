@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { isAxiosError } from "axios";
-import { callsApi, connectCallEvents } from "../api";
+import { callsApi, connectCallEvents, intentsApi } from "../api";
 import { StatusBadge } from "../components/StatusBadge";
-import type { TranscriptSegment } from "../types";
+import type { Call, TranscriptSegment } from "../types";
 import { contactDisplayName } from "../types";
 
 function getErrorMessage(err: unknown): string {
@@ -17,12 +17,30 @@ function segmentKey(speaker: string, text: string): string {
   return `${speaker}:${text}`;
 }
 
+type LiveSegment = {
+  speaker: string;
+  text: string;
+  segmentId?: string;
+  intentId?: string;
+  confidence?: number;
+  classifier?: string;
+  debugJson?: string | null;
+};
+
 function mergeTranscript(
   persisted: TranscriptSegment[],
-  live: { speaker: string; text: string }[],
-): { speaker: string; text: string }[] {
+  live: LiveSegment[],
+): LiveSegment[] {
   const seen = new Set(persisted.map((t) => segmentKey(t.speaker, t.text)));
-  const merged = persisted.map((t) => ({ speaker: t.speaker, text: t.text }));
+  const merged: LiveSegment[] = persisted.map((t) => ({
+    speaker: t.speaker,
+    text: t.text,
+    segmentId: t.id,
+    intentId: t.classification?.intentId,
+    confidence: t.classification?.confidence,
+    classifier: t.classification?.classifier,
+    debugJson: t.classification?.debugJson,
+  }));
   for (const item of live) {
     const key = segmentKey(item.speaker, item.text);
     if (!seen.has(key)) {
@@ -35,8 +53,11 @@ function mergeTranscript(
 
 export function CallsPage() {
   const qc = useQueryClient();
-  const [liveTranscript, setLiveTranscript] = useState<{ speaker: string; text: string }[]>([]);
+  const [liveTranscript, setLiveTranscript] = useState<LiveSegment[]>([]);
   const [callError, setCallError] = useState<string | null>(null);
+  const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
+  const [debugSegment, setDebugSegment] = useState<LiveSegment | null>(null);
+  const [relabelIntent, setRelabelIntent] = useState("");
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
   const { data: calls } = useQuery({ queryKey: ["calls"], queryFn: callsApi.list });
@@ -45,10 +66,21 @@ export function CallsPage() {
     queryFn: callsApi.active,
     refetchInterval: 2000,
   });
+  const { data: selectedCall } = useQuery({
+    queryKey: ["call", selectedCallId],
+    queryFn: () => callsApi.get(selectedCallId!),
+    enabled: !!selectedCallId,
+  });
+  const { data: intents } = useQuery({ queryKey: ["intents"], queryFn: intentsApi.list });
 
+  const displayCall = activeCall ?? selectedCall;
   const displayTranscript = useMemo(
-    () => mergeTranscript(activeCall?.transcript ?? [], liveTranscript),
-    [activeCall?.transcript, liveTranscript],
+    () =>
+      mergeTranscript(
+        displayCall?.transcript ?? [],
+        displayCall?.id === activeCall?.id ? liveTranscript : [],
+      ),
+    [displayCall?.transcript, displayCall?.id, activeCall?.id, liveTranscript],
   );
 
   const nextMutation = useMutation({
@@ -63,6 +95,17 @@ export function CallsPage() {
     onError: (err) => setCallError(getErrorMessage(err)),
   });
 
+  const relabelMutation = useMutation({
+    mutationFn: () =>
+      intentsApi.relabel(debugSegment!.segmentId!, relabelIntent, true),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["call", selectedCallId] });
+      qc.invalidateQueries({ queryKey: ["activeCall"] });
+      qc.invalidateQueries({ queryKey: ["intents"] });
+      setDebugSegment(null);
+    },
+  });
+
   useEffect(() => {
     setLiveTranscript([]);
   }, [activeCall?.id]);
@@ -73,7 +116,14 @@ export function CallsPage() {
 
   useEffect(() => {
     const ws = connectCallEvents((event) => {
-      const e = event as { type: string; speaker?: string; text?: string };
+      const e = event as {
+        type: string;
+        speaker?: string;
+        text?: string;
+        segmentId?: string;
+        intentId?: string;
+        confidence?: number;
+      };
       if (e.type === "transcript" && e.speaker && e.text) {
         setLiveTranscript((prev) => {
           const last = prev[prev.length - 1];
@@ -82,6 +132,25 @@ export function CallsPage() {
           if (prev.some((t) => segmentKey(t.speaker, t.text) === key)) return prev;
           return [...prev, { speaker: e.speaker!, text: e.text! }];
         });
+      }
+      if (e.type === "classification" && e.segmentId) {
+        setLiveTranscript((prev) => {
+          const idx = prev.findIndex(
+            (t) => t.speaker === "customer" && !t.segmentId,
+          );
+          if (idx >= 0) {
+            const copy = [...prev];
+            copy[idx] = {
+              ...copy[idx]!,
+              segmentId: e.segmentId,
+              intentId: e.intentId,
+              confidence: e.confidence,
+            };
+            return copy;
+          }
+          return prev;
+        });
+        qc.invalidateQueries({ queryKey: ["activeCall"] });
       }
       if (e.type === "call_ended") {
         setLiveTranscript([]);
@@ -95,6 +164,9 @@ export function CallsPage() {
     });
     return () => ws.close();
   }, [qc]);
+
+  const intentLabel = (intentId?: string) =>
+    intents?.find((i) => i.id === intentId)?.labelHe ?? intentId ?? "—";
 
   return (
     <div className="space-y-6">
@@ -114,22 +186,77 @@ export function CallsPage() {
         </div>
       )}
 
-      {activeCall && (
+      {displayCall && (
         <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
           <h3 className="font-semibold">
-            שיחה פעילה —{" "}
-            {activeCall.contact
-              ? contactDisplayName(activeCall.contact)
-              : "—"}
+            {activeCall ? "שיחה פעילה" : "פרטי שיחה"} —{" "}
+            {displayCall.contact ? contactDisplayName(displayCall.contact) : "—"}
           </h3>
-          <p className="text-sm">שלב: {activeCall.currentStage ?? "—"}</p>
-          <div className="mt-3 max-h-48 overflow-y-auto rounded-lg bg-white p-3 text-sm">
+          <p className="text-sm">
+            צומת: {displayCall.currentNodeId ?? displayCall.currentStage ?? "—"}
+          </p>
+          <div className="mt-3 max-h-64 overflow-y-auto rounded-lg bg-white p-3 text-sm">
             {displayTranscript.map((t, i) => (
-              <p key={`${t.speaker}-${i}-${t.text.slice(0, 24)}`}>
-                <strong>{t.speaker === "ai" ? "AI" : "לקוח"}:</strong> {t.text}
-              </p>
+              <div key={`${t.speaker}-${i}-${t.text.slice(0, 24)}`} className="mb-2 border-b pb-2">
+                <p>
+                  <strong>{t.speaker === "ai" ? "AI" : "לקוח"}:</strong> {t.text}
+                </p>
+                {t.speaker === "customer" && t.intentId && (
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <span className="rounded-full bg-purple-100 px-2 py-0.5 text-xs text-purple-800">
+                      {intentLabel(t.intentId)} ({Math.round((t.confidence ?? 0) * 100)}%)
+                    </span>
+                    {t.segmentId && (
+                      <button
+                        className="text-xs text-blue-600 underline"
+                        onClick={() => {
+                          setDebugSegment(t);
+                          setRelabelIntent(t.intentId ?? "");
+                        }}
+                      >
+                        פרטים / תיקון
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             ))}
             <div ref={transcriptEndRef} />
+          </div>
+        </div>
+      )}
+
+      {debugSegment && (
+        <div className="rounded-xl border bg-white p-4 text-sm">
+          <h4 className="mb-2 font-semibold">פרטי סיווג</h4>
+          <p>מסווג: {debugSegment.classifier ?? "—"}</p>
+          <p>כוונה: {intentLabel(debugSegment.intentId)}</p>
+          {debugSegment.debugJson && (
+            <pre className="mt-2 overflow-x-auto rounded bg-slate-50 p-2 text-xs">
+              {debugSegment.debugJson}
+            </pre>
+          )}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <select
+              className="rounded border px-2 py-1"
+              value={relabelIntent}
+              onChange={(e) => setRelabelIntent(e.target.value)}
+            >
+              {intents?.map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.labelHe}
+                </option>
+              ))}
+            </select>
+            <button
+              className="rounded bg-blue-600 px-3 py-1 text-white"
+              onClick={() => relabelMutation.mutate()}
+            >
+              שמור כוונה + הוסף כדוגמה
+            </button>
+            <button className="rounded border px-3 py-1" onClick={() => setDebugSegment(null)}>
+              סגור
+            </button>
           </div>
         </div>
       )}
@@ -146,8 +273,12 @@ export function CallsPage() {
             </tr>
           </thead>
           <tbody>
-            {calls?.items.map((call) => (
-              <tr key={call.id} className="border-t">
+            {calls?.items.map((call: Call) => (
+              <tr
+                key={call.id}
+                className={`cursor-pointer border-t hover:bg-slate-50 ${selectedCallId === call.id ? "bg-blue-50" : ""}`}
+                onClick={() => setSelectedCallId(call.id)}
+              >
                 <td className="px-4 py-3">
                   {call.contact ? contactDisplayName(call.contact) : "—"}
                 </td>

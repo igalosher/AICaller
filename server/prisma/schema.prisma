@@ -56,6 +56,7 @@ model Call {
   outcome        CallOutcome           @default(none)
   externalCallId String?
   currentStage   String?
+  currentNodeId  String?
   summary        String?
   startedAt      DateTime              @default(now())
   endedAt        DateTime?
@@ -64,12 +65,53 @@ model Call {
 }
 
 model CallTranscriptSegment {
+  id             String                   @id @default(cuid())
+  callId         String
+  call           Call                     @relation(fields: [callId], references: [id], onDelete: Cascade)
+  speaker        String
+  text           String
+  timestamp      DateTime                 @default(now())
+  classification UtteranceClassification?
+}
+
+model Intent {
+  id                    String                    @id
+  labelHe               String
+  descriptionHe         String                    @default("")
+  category              String                    @default("general")
+  active                Boolean                   @default(true)
+  confidenceThreshold   Float                     @default(0.7)
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  examples              IntentExample[]
+  classifications       UtteranceClassification[]
+}
+
+model IntentExample {
   id        String   @id @default(cuid())
-  callId    String
-  call      Call     @relation(fields: [callId], references: [id], onDelete: Cascade)
-  speaker   String
-  text      String
-  timestamp DateTime @default(now())
+  intentId  String
+  intent    Intent   @relation(fields: [intentId], references: [id], onDelete: Cascade)
+  phrase    String
+  createdAt DateTime @default(now())
+
+  @@index([intentId])
+}
+
+model UtteranceClassification {
+  id           String                @id @default(cuid())
+  segmentId    String                @unique
+  segment      CallTranscriptSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  callId       String
+  intentId     String
+  intent       Intent                @relation(fields: [intentId], references: [id])
+  confidence   Float
+  entitiesJson String                @default("{}")
+  classifier   String
+  debugJson    String?
+  createdAt    DateTime              @default(now())
+
+  @@index([callId])
+  @@index([intentId])
 }
 
 model SalesPacket {
@@ -118,14 +160,17 @@ model PhonePlan {
 }
 
 model CallFlow {
-  id              String   @id @default(cuid())
-  version         Int      @default(1)
-  openingTemplate String
-  stagesJson      String
-  objectionsJson  String   @default("{}")
-  isActive        Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  calls           Call[]
+  id                 String    @id @default(cuid())
+  version            Int       @default(1)
+  openingTemplate    String
+  stagesJson         String
+  objectionsJson     String    @default("{}")
+  draftGraphJson     String    @default("{}")
+  publishedGraphJson String    @default("{}")
+  graphPublishedAt   DateTime?
+  isActive           Boolean   @default(true)
+  createdAt          DateTime  @default(now())
+  calls              Call[]
 }
 
 model AppSettings {

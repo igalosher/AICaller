@@ -5,6 +5,8 @@ const nav = [
   { to: "/contacts", label: "אנשי קשר" },
   { to: "/calls", label: "שיחות" },
   { to: "/sales", label: "הגדרות מכירה" },
+  { to: "/flow-builder", label: "בניית זרימה" },
+  { to: "/intents", label: "ניהול כוונות" },
   { to: "/call-flow", label: "זרימת שיחה" },
   { to: "/settings", label: "הגדרות" },
 ];

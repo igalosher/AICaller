@@ -11,7 +11,8 @@
     "db:seed": "tsx src/seed.ts",
     "db:generate": "prisma generate",
     "postinstall": "prisma generate",
-    "test:twilio": "tsx scripts/test-twilio.ts"
+    "test:twilio": "tsx scripts/test-twilio.ts",
+    "test:visual-flow": "tsx scripts/test-visual-flow.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.0",

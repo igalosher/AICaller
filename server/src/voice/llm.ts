@@ -12,6 +12,9 @@ export interface SalesReplyContext {
   customerFirstName: string;
   stagePrompt: string;
   isOpeningTurn?: boolean;
+  channelContext?: string;
+  packetContext?: string;
+  nodeText?: string;
 }
 
 const SYSTEM_PROMPT = `את נציגת מכירות של YES (טלוויזיה, טלפון ואינטרנט בישראל).
@@ -41,7 +44,7 @@ export async function generateSalesReply(
             { role: "system", content: SYSTEM_PROMPT },
             {
               role: "system",
-              content: `שם פרטי (להקשר בלבד): ${context.customerFirstName}. שלב נוכחי: ${context.stagePrompt}. חבילות: ${JSON.stringify(packets)}`,
+              content: `שם פרטי (להקשר בלבד): ${context.customerFirstName}. שלב נוכחי: ${context.stagePrompt}. חבילות: ${JSON.stringify(packets)}${context.channelContext ? `. ערוץ: ${context.channelContext}` : ""}${context.packetContext ? `. חבילה: ${context.packetContext}` : ""}${context.nodeText ? `. הנחיית צומת: ${context.nodeText}` : ""}`,
             },
             {
               role: "user",

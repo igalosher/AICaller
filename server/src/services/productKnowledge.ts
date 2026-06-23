@@ -1,5 +1,12 @@
 import { prisma } from "../db.js";
 import { salesService } from "./salesService.js";
+import {
+  channelsInPacket,
+  describeChannel,
+  findChannelByName,
+  fuzzyMatchChannel,
+  listCatalogChannels,
+} from "./catalogChannelLookup.js";
 
 export interface KnowledgePacket {
   id: string;
@@ -121,6 +128,17 @@ export const productTools = {
       return c.nameHe.includes(query) || list.some((ch) => ch.includes(query));
     });
     if (fromDb.length) return fromDb;
+    const catalogHits = await fuzzyMatchChannel(query);
+    if (catalogHits) {
+      return [
+        {
+          nameHe: catalogHits.channel.name,
+          channels: JSON.stringify([catalogHits.channel.name]),
+          description: catalogHits.channel.description,
+          packets: catalogHits.channel.packets,
+        },
+      ];
+    }
     if (!yesCatalog) return [];
     const tv = yesCatalog.טלוויזיה as Record<string, unknown> | undefined;
     const paid = (tv?.חבילות_ערוצים_בתשלום as { שם?: string; ערוצים?: string[] }[]) ?? [];
@@ -131,5 +149,19 @@ export const productTools = {
           (p.ערוצים ?? []).some((ch) => ch.includes(query)),
       )
       .map((p) => ({ nameHe: p.שם, channels: JSON.stringify(p.ערוצים ?? []) }));
+  },
+  async get_channel(name: string) {
+    const hit = await findChannelByName(name);
+    if (hit) return hit.channel;
+    return describeChannel(name);
+  },
+  async channels_in_packet(packetName: string) {
+    return channelsInPacket(packetName);
+  },
+  async describe_channel(name: string) {
+    return describeChannel(name);
+  },
+  async list_catalog_channels() {
+    return listCatalogChannels();
   },
 };

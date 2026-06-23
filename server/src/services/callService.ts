@@ -5,6 +5,7 @@ import {
   getActiveCallFlow,
   parseCallFlow,
   previewOpeningLine,
+  type CallFlowEngine,
 } from "./callFlowService.js";
 import {
   ensureCallable,
@@ -23,15 +24,79 @@ import { clearPlayback, registerMediaStreamCallbacks, registerVoiceHandlers, spe
 import { playOnTwilioCall } from "../voice/twilioPlay.js";
 import { toTelephonyError } from "../telephony/errors.js";
 import { logger } from "../logger.js";
-import type { CallOutcome, CallStatus } from "@prisma/client";
+import { createEngineFromGraph, GraphFlowEngine } from "../flow/graphFlowEngine.js";
+import { getPublishedGraphForCall } from "./flowGraphService.js";
+import {
+  classifyUtterance,
+  getIntentThresholds,
+  persistClassification,
+} from "./intentService.js";
+import { describeChannel } from "./catalogChannelLookup.js";
+import type { SpeakNode } from "../flow/graphTypes.js";
+import type { CallOutcome, CallStatus, CallFlow, Contact } from "@prisma/client";
 
 export type VoiceTurnResult = { sayText: string; endCall: boolean };
 
-const activeSessions = new Map<
-  string,
-  { tts?: TtsSession; engine: ReturnType<typeof createEngineFromFlow> }
->();
+type SessionEngine =
+  | { mode: "graph"; engine: GraphFlowEngine }
+  | { mode: "linear"; engine: CallFlowEngine };
+
+const activeSessions = new Map<string, { tts?: TtsSession; session: SessionEngine }>();
 const voiceSessionsStarted = new Set<string>();
+
+function templateVars(firstName: string, familyName: string) {
+  const full = contactFullName(firstName, familyName);
+  return {
+    customer_name: full,
+    customer_full_name: full,
+    customer_first_name: firstName,
+  };
+}
+
+function createSessionEngine(flow: {
+  stagesJson: string;
+  objectionsJson: string;
+  publishedGraphJson: string;
+  draftGraphJson: string;
+}): SessionEngine {
+  const graph = getPublishedGraphForCall(flow);
+  if (graph) {
+    return { mode: "graph", engine: createEngineFromGraph(JSON.stringify(graph)) };
+  }
+  return { mode: "linear", engine: createEngineFromFlow(flow) };
+}
+
+async function buildChannelContext(channelName?: string): Promise<string | undefined> {
+  if (!channelName) return undefined;
+  const ch = await describeChannel(channelName);
+  if (!ch) return channelName;
+  return `${ch.name}: ${ch.description ?? "ערוץ בקטלוג YES"}. כלול ב: ${ch.packets.join(", ")}`;
+}
+
+async function speakFromNode(
+  node: SpeakNode,
+  contact: { firstName: string; familyName: string },
+  userMessage?: string,
+  entities?: { channel?: string; packet?: string },
+): Promise<string> {
+  const vars = templateVars(contact.firstName, contact.familyName);
+  let text = node.text;
+  text = text.replace(/\{\{(\w+)\}\}/g, (_match: string, key: string) => vars[key as keyof typeof vars] ?? "");
+
+  if (node.useLlm || userMessage) {
+    const channelContext = await buildChannelContext(entities?.channel);
+    const reply = await generateSalesReply(userMessage ?? text, {
+      customerFirstName: contact.firstName,
+      stagePrompt: text,
+      nodeText: text,
+      channelContext,
+      packetContext: entities?.packet,
+      isOpeningTurn: !userMessage,
+    });
+    return reply.text;
+  }
+  return text;
+}
 
 export async function recoverStuckContacts(): Promise<void> {
   const staleBefore = new Date(Date.now() - 2 * 60 * 1000);
@@ -70,12 +135,16 @@ export async function startCall(contactId: string) {
   ensureCallable(contact.status);
 
   const flow = await getActiveCallFlow();
+  const graph = getPublishedGraphForCall(flow);
+  const startNodeId = graph?.startNodeId ?? JSON.parse(flow.stagesJson)[0]?.id ?? "greeting";
+
   const call = await prisma.call.create({
     data: {
       contactId,
       flowVersionId: flow.id,
       status: "dialing",
-      currentStage: JSON.parse(flow.stagesJson)[0]?.id ?? "greeting",
+      currentStage: startNodeId,
+      currentNodeId: startNodeId,
     },
   });
 
@@ -203,24 +272,50 @@ export async function prepareInitialVoiceTurn(callId: string): Promise<VoiceTurn
 
   await updateCallStatus(callId, "connected");
 
-  const parsed = parseCallFlow(call.callFlow);
-  const opening = previewOpeningLine(
-    parsed.openingTemplate,
-    contactFullName(call.contact.firstName, call.contact.familyName),
-  );
-  const engine = createEngineFromFlow(call.callFlow);
-  activeSessions.set(callId, { engine });
-
-  let sayText = opening;
-  const stage = engine.getCurrentStage();
-  if (stage) {
-    const reply = await generateSalesReply(stage.prompt, {
-      customerFirstName: call.contact.firstName,
-      stagePrompt: stage.prompt,
-      isOpeningTurn: true,
-    });
-    sayText = `${opening} ${reply.text}`;
+  const sessionEngine = createSessionEngine(call.callFlow);
+  if (call.currentNodeId && sessionEngine.mode === "graph") {
+    sessionEngine.engine.currentNodeId = call.currentNodeId;
   }
+  activeSessions.set(callId, { session: sessionEngine });
+
+  let sayText = "שלום.";
+
+  if (sessionEngine.mode === "graph") {
+    const node = sessionEngine.engine.getCurrentNode();
+    if (node?.type === "speak") {
+      sayText = await speakFromNode(node, call.contact);
+      const edge = sessionEngine.engine.getNextAutoEdge(node.id);
+      if (edge) {
+        sessionEngine.engine.currentNodeId = edge.target;
+        sessionEngine.engine.advanceThroughSpeakChain();
+      }
+    }
+  } else {
+    const parsed = parseCallFlow(call.callFlow);
+    const opening = previewOpeningLine(
+      parsed.openingTemplate,
+      contactFullName(call.contact.firstName, call.contact.familyName),
+    );
+    const stage = sessionEngine.engine.getCurrentStage();
+    let body = opening;
+    if (stage) {
+      const reply = await generateSalesReply(stage.prompt, {
+        customerFirstName: call.contact.firstName,
+        stagePrompt: stage.prompt,
+        isOpeningTurn: true,
+      });
+      body = `${opening} ${reply.text}`;
+    }
+    sayText = body;
+  }
+
+  await prisma.call.update({
+    where: { id: callId },
+    data: {
+      currentNodeId: sessionEngine.mode === "graph" ? sessionEngine.engine.currentNodeId : undefined,
+      currentStage: sessionEngine.mode === "linear" ? sessionEngine.engine.currentStageId : sessionEngine.engine.currentNodeId,
+    },
+  });
 
   await addTranscript(callId, "ai", sayText);
   broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
@@ -249,16 +344,116 @@ export async function processCustomerTurn(callId: string, text: string): Promise
     return { sayText: "סליחה, אירעה שגיאה.", endCall: true };
   }
 
-  await addTranscript(callId, "customer", text);
+  const segment = await addTranscript(callId, "customer", text);
   broadcastCallEvent({ type: "transcript", callId, speaker: "customer", text });
 
-  const session = activeSessions.get(callId);
-  const engine =
-    session?.engine ?? createEngineFromFlow(call.callFlow, call.currentStage ?? undefined);
+  const classification = await classifyUtterance(text);
+  await persistClassification(segment.id, callId, classification);
+  broadcastCallEvent({
+    type: "classification",
+    callId,
+    segmentId: segment.id,
+    intentId: classification.intentId,
+    confidence: classification.confidence,
+  });
+
+  let session = activeSessions.get(callId);
   if (!session) {
-    activeSessions.set(callId, { engine });
+    const sessionEngine = createSessionEngine(call.callFlow);
+    if (call.currentNodeId && sessionEngine.mode === "graph") {
+      sessionEngine.engine.currentNodeId = call.currentNodeId;
+    } else if (call.currentStage && sessionEngine.mode === "linear") {
+      sessionEngine.engine.currentStageId = call.currentStage;
+    }
+    session = { session: sessionEngine };
+    activeSessions.set(callId, session);
   }
 
+  if (session.session.mode === "graph") {
+    return processGraphTurn(callId, call as CallWithRelations, session.session.engine, text, classification);
+  }
+
+  return processLinearTurn(callId, call as CallWithRelations, session.session.engine, text);
+}
+
+type CallWithRelations = {
+  id: string;
+  contact: Contact;
+  callFlow: CallFlow;
+};
+
+async function processGraphTurn(
+  callId: string,
+  call: CallWithRelations,
+  engine: GraphFlowEngine,
+  text: string,
+  classification: Awaited<ReturnType<typeof classifyUtterance>>,
+): Promise<VoiceTurnResult> {
+  const thresholds = await getIntentThresholds();
+  let node = engine.getCurrentNode();
+
+  if (node?.type === "listen" || node?.type === "intent_route" || node?.type === "decision") {
+    node = engine.advanceByClassification(classification, thresholds) ?? undefined;
+  }
+
+  if (engine.isEndNode(node)) {
+    const outcome = node.outcome ?? detectOutcome(text) ?? "none";
+    const endOutcome =
+      outcome === "sold" || outcome === "refused" || outcome === "callback"
+        ? outcome
+        : (detectOutcome(text) ?? "none");
+    const sayText =
+      endOutcome === "refused"
+        ? "תודה על זמנך. יום נעים!"
+        : endOutcome === "callback"
+          ? "נחזור אליך בזמן שנוח לך."
+          : endOutcome === "sold"
+            ? "מצוין! נסכם את הפרטים ונשלח אישור."
+            : "תודה רבה על השיחה.";
+    await addTranscript(callId, "ai", sayText);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
+    if (endOutcome !== "none") {
+      await finalizeCall(callId, endOutcome);
+      return { sayText, endCall: true };
+    }
+  }
+
+  node = engine.advanceThroughSpeakChain() ?? engine.getCurrentNode();
+
+  let sayText = "אשמח להמשיך לעזור לך.";
+  if (node?.type === "speak") {
+    sayText = await speakFromNode(node, call.contact, text, classification.entities);
+    const edge = engine.getNextAutoEdge(node.id);
+    if (edge) {
+      engine.currentNodeId = edge.target;
+      engine.advanceThroughSpeakChain();
+    }
+  }
+
+  await prisma.call.update({
+    where: { id: callId },
+    data: { currentNodeId: engine.currentNodeId, currentStage: engine.currentNodeId },
+  });
+
+  const outcome = detectOutcome(text + " " + sayText);
+  if (outcome === "refused" || outcome === "sold" || outcome === "callback") {
+    await addTranscript(callId, "ai", sayText);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
+    await finalizeCall(callId, outcome);
+    return { sayText, endCall: true };
+  }
+
+  await addTranscript(callId, "ai", sayText);
+  broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
+  return { sayText, endCall: false };
+}
+
+async function processLinearTurn(
+  callId: string,
+  call: CallWithRelations,
+  engine: CallFlowEngine,
+  text: string,
+): Promise<VoiceTurnResult> {
   const stage = engine.getCurrentStage();
   const reply = await generateSalesReply(text, {
     customerFirstName: call.contact.firstName,
@@ -333,8 +528,13 @@ export async function finalizeCall(callId: string, outcome: CallOutcome) {
   const segments = await prisma.callTranscriptSegment.findMany({
     where: { callId },
     orderBy: { timestamp: "asc" },
+    include: { classification: { include: { intent: true } } },
   });
-  const summary = `תוצאה: ${outcome}. ${segments.length} קטעי שיחה.`;
+  const intents = segments
+    .filter((s) => s.classification)
+    .map((s) => s.classification!.intent.labelHe)
+    .join(", ");
+  const summary = `תוצאה: ${outcome}. ${segments.length} קטעי שיחה. כוונות: ${intents || "—"}.`;
   const durationSec = Math.floor((Date.now() - call.startedAt.getTime()) / 1000);
 
   await prisma.call.update({
@@ -364,7 +564,12 @@ export async function getCall(id: string) {
     where: { id },
     include: {
       contact: true,
-      transcript: { orderBy: { timestamp: "asc" } },
+      transcript: {
+        orderBy: { timestamp: "asc" },
+        include: {
+          classification: { include: { intent: true } },
+        },
+      },
     },
   });
   if (!call) throw new AppError(404, "שיחה לא נמצאה");
@@ -374,7 +579,15 @@ export async function getCall(id: string) {
 export async function getActiveCall() {
   return prisma.call.findFirst({
     where: { status: { in: ["dialing", "ringing", "connected"] } },
-    include: { contact: true, transcript: { orderBy: { timestamp: "asc" } } },
+    include: {
+      contact: true,
+      transcript: {
+        orderBy: { timestamp: "asc" },
+        include: {
+          classification: { include: { intent: true } },
+        },
+      },
+    },
   });
 }
 

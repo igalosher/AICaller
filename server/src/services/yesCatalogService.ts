@@ -10,6 +10,7 @@ import {
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { clearChannelCache } from "./catalogChannelLookup.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CATALOG_PATH = path.join(__dirname, "../../data/yes-catalog.json");
@@ -91,6 +92,7 @@ export async function importYesCatalog(
   });
 
   await refreshProductKnowledge();
+  clearChannelCache();
   return buildCatalogSummary(catalog);
 }
 

@@ -6,6 +6,8 @@ import { ContactsPage } from "./pages/ContactsPage";
 import { CallsPage } from "./pages/CallsPage";
 import { SalesPage } from "./pages/SalesPage";
 import { CallFlowPage } from "./pages/CallFlowPage";
+import { FlowBuilderPage } from "./pages/FlowBuilderPage";
+import { IntentsPage } from "./pages/IntentsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
 const queryClient = new QueryClient();
@@ -20,6 +22,8 @@ export default function App() {
             <Route path="contacts" element={<ContactsPage />} />
             <Route path="calls" element={<CallsPage />} />
             <Route path="sales" element={<SalesPage />} />
+            <Route path="flow-builder" element={<FlowBuilderPage />} />
+            <Route path="intents" element={<IntentsPage />} />
             <Route path="call-flow" element={<CallFlowPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>

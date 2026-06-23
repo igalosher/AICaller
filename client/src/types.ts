@@ -21,6 +21,7 @@ export interface Call {
   status: string;
   outcome: string;
   currentStage?: string | null;
+  currentNodeId?: string | null;
   summary?: string | null;
   startedAt: string;
   endedAt?: string | null;
@@ -34,6 +35,53 @@ export interface TranscriptSegment {
   speaker: string;
   text: string;
   timestamp: string;
+  classification?: UtteranceClassification | null;
+}
+
+export interface UtteranceClassification {
+  id: string;
+  intentId: string;
+  confidence: number;
+  entitiesJson: string;
+  classifier: string;
+  debugJson?: string | null;
+  intent?: Intent;
+}
+
+export interface Intent {
+  id: string;
+  labelHe: string;
+  descriptionHe: string;
+  category: string;
+  active: boolean;
+  confidenceThreshold: number;
+  examples?: { id: string; phrase: string }[];
+  usageCount?: number;
+}
+
+export interface FlowNode {
+  id: string;
+  type: "speak" | "listen" | "decision" | "intent_route" | "end";
+  label?: string;
+  text?: string;
+  useLlm?: boolean;
+  outcome?: string;
+  position?: { x: number; y: number };
+}
+
+export interface FlowEdge {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+  intentId?: string;
+  isDefault?: boolean;
+}
+
+export interface FlowGraph {
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  startNodeId: string;
 }
 
 export interface SalesPacket {
@@ -52,6 +100,8 @@ export interface CallFlow {
   openingTemplate: string;
   stagesJson: string;
   objectionsJson: string;
+  draftGraphJson?: string;
+  publishedGraphJson?: string;
   isActive: boolean;
 }
 

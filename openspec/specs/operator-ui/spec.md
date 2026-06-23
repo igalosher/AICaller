@@ -11,7 +11,7 @@ The entire operator interface SHALL be in Hebrew with right-to-left (RTL) layout
 - **THEN** text direction is RTL, labels are in Hebrew, and navigation follows RTL conventions
 
 ### Requirement: Main navigation
-The application SHALL provide a main menu with sections: Contacts (אנשי קשר), Calls (שיחות), Sales Configuration (הגדרות מכירה), Call Flow (זרימת שיחה), and Settings (הגדרות).
+The application SHALL provide a main menu with sections: Contacts (אנשי קשר), Calls (שיחות), Sales Configuration (הגדרות מכירה), **Flow Builder (בניית זרימה)**, **Intent Management (ניהול כוונות)**, Call Flow (זרימת שיחה — legacy, redirects or embeds builder), and Settings (הגדרות).
 
 #### Scenario: Navigate between sections
 - **WHEN** an operator selects a menu item
@@ -25,11 +25,11 @@ The contacts screen SHALL display a searchable, filterable table of contacts wit
 - **THEN** contacts are shown with name, phone, status badge, and last call date
 
 ### Requirement: Calls dashboard
-The calls section SHALL show active calls, recent call log, and quick actions to start a new call or call next in queue.
+The calls section SHALL show active calls, recent call log, and quick actions; **call detail view SHALL display intent label and confidence on each customer transcript line**.
 
-#### Scenario: View recent calls
-- **WHEN** an operator opens the calls section
-- **THEN** recent calls are listed with contact name, duration, outcome, and timestamp
+#### Scenario: View transcript with intents
+- **WHEN** an operator opens a completed call detail
+- **THEN** each customer utterance shows its classified intent badge and optional re-label action linking to Intent Management
 
 ### Requirement: Sales configuration screens
 Operators SHALL manage packets, channels, internet tiers, and phone options through dedicated configuration forms with Hebrew labels and validation feedback.
@@ -39,11 +39,11 @@ Operators SHALL manage packets, channels, internet tiers, and phone options thro
 - **THEN** all active and inactive packets are listed with edit and deactivate actions
 
 ### Requirement: Call flow editor
-Operators SHALL edit opening lines, flow stages, and objection scripts through a visual or structured editor with template variable hints.
+Operators SHALL design conversation flows in the **visual Flow Builder** (graph canvas with speak, listen, decision, and intent-route nodes). The legacy structured editor MAY remain as read-only import source until deprecated.
 
-#### Scenario: Edit opening line
-- **WHEN** an operator opens call flow configuration
-- **THEN** the opening line editor shows available variables (e.g., `{{customer_name}}`) and a preview
+#### Scenario: Edit opening speak node
+- **WHEN** an operator opens Flow Builder and selects the start speak node
+- **THEN** the editor shows template variables (e.g., `{{customer_first_name}}`) and a Hebrew preview
 
 ### Requirement: Settings screen
 The settings screen SHALL include telephony provider config, AI/voice provider config, and general application preferences.
@@ -58,4 +58,22 @@ The home/dashboard SHALL show key metrics: total contacts, pending calls, sold t
 #### Scenario: Dashboard metrics
 - **WHEN** an operator opens the application
 - **THEN** summary metrics reflect current data from the contact and call databases
+
+### Requirement: Flow Builder screen
+The application SHALL provide a full-screen Flow Builder with node palette, canvas zoom/pan, edge labels, validation panel, draft save, and publish actions—all in Hebrew RTL.
+
+#### Scenario: Build decision branch
+- **WHEN** an operator adds a decision node and connects "מחיר גבוה" and "לא מעוניין" edges to different speak nodes
+- **THEN** the graph is persisted as draft and can be published after validation passes
+
+### Requirement: Intent Management screen
+The application SHALL provide a dedicated Intent Management screen to create/edit intents, manage Hebrew example phrases, set per-intent confidence thresholds, and view usage statistics.
+
+#### Scenario: Tune intent from management screen
+- **WHEN** an operator adds example phrases to `ask_channel` on the Intent Management screen
+- **THEN** subsequent calls classify channel questions with higher accuracy
+
+#### Scenario: Re-label utterance from call review
+- **WHEN** an operator corrects a misclassified utterance on the Calls screen and saves as example
+- **THEN** the phrase is added to the chosen intent without leaving the call review flow
 

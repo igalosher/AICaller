@@ -2,8 +2,13 @@ import { prisma } from "./db.js";
 import { refreshProductKnowledge } from "./services/productKnowledge.js";
 import { createCallFlowVersion } from "./services/callFlowService.js";
 import { ensureYesCatalogSeeded } from "./services/yesCatalogService.js";
+import { seedDefaultIntents } from "./services/intentService.js";
+import { ensureStarterGraphPublished } from "./services/flowGraphService.js";
+import { createDefaultStarterFlow } from "./flow/starterFlow.js";
 
 export async function runSeed() {
+  await seedDefaultIntents();
+
   const contactCount = await prisma.contact.count();
   if (contactCount === 0) {
     await prisma.contact.createMany({
@@ -18,37 +23,30 @@ export async function runSeed() {
   await ensureYesCatalogSeeded();
   const flowCount = await prisma.callFlow.count();
   if (flowCount === 0) {
-    await createCallFlowVersion({
-      openingTemplate:
-        "שלום {{customer_name}}, מדברת נציגת YES. שיחה זו מוקלטת לצורכי איכות. יש לי הצעה מיוחדת עבורך היום.",
-      stages: [
-        {
-          id: "greeting",
-          prompt: "האם זה זמן נוח לשמוע על חבילות YES?",
-          next: "qualification",
-        },
-        {
-          id: "qualification",
-          prompt: "האם אתה מעוניין בטלוויזיה, אינטרנט, או חבילה משולבת?",
-          next: "pitch",
-        },
-        {
-          id: "pitch",
-          prompt: "יש לנו חבילת טריפל מצוינת החל מ-149 שקלים לחודש. היא כוללת ערוצי ספורט, ילדים, אינטרנט סיבים וטלפון.",
-          next: "closing",
-        },
-        {
-          id: "closing",
-          prompt: "האם תרצה לסגור את העסקה היום ולקבל את כל הפרטים?",
-          next: "closing",
-        },
-      ],
-      objections: {
-        price: "אני מבינה. יש לנו גם חבילות קטנות יותר החל מ-99 שקלים, ואפשר לשלב מבצעים.",
-        not_interested: "אין בעיה, תודה על זמנך. אם תרצה בעתיד — אנחנו כאן.",
-        callback: "בשמחה, מתי יהיה נוח לחזור אליך?",
+    const starterGraph = createDefaultStarterFlow();
+    await prisma.callFlow.create({
+      data: {
+        version: 1,
+        openingTemplate:
+          "שלום {{customer_full_name}}, מדברת נציגת YES. שיחה זו מוקלטת לצורכי איכות. יש לי הצעה מיוחדת עבורך היום.",
+        stagesJson: JSON.stringify([
+          { id: "greeting", prompt: "האם זה זמן נוח?", next: "pitch" },
+          { id: "pitch", prompt: "חבילת טריפל מ-149 שקלים.", next: "closing" },
+          { id: "closing", prompt: "לסגור היום?", next: "closing" },
+        ]),
+        objectionsJson: JSON.stringify({
+          price_objection: "יש חבילות מ-99 שקלים.",
+          not_interested: "תודה על זמנך.",
+          callback: "מתי לחזור?",
+        }),
+        draftGraphJson: JSON.stringify(starterGraph),
+        publishedGraphJson: JSON.stringify(starterGraph),
+        graphPublishedAt: new Date(),
+        isActive: true,
       },
     });
+  } else {
+    await ensureStarterGraphPublished();
   }
 
   await refreshProductKnowledge();
