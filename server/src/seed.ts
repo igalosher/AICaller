@@ -3,8 +3,8 @@ import { refreshProductKnowledge } from "./services/productKnowledge.js";
 import { createCallFlowVersion } from "./services/callFlowService.js";
 import { ensureYesCatalogSeeded } from "./services/yesCatalogService.js";
 import { seedDefaultIntents } from "./services/intentService.js";
-import { ensureStarterGraphPublished } from "./services/flowGraphService.js";
-import { createDefaultStarterFlow } from "./flow/starterFlow.js";
+import { ensureStarterGraphPublished, migrateToSigalFlowIfNeeded } from "./services/flowGraphService.js";
+import { createDefaultStarterFlow, SIGAL_OPENING } from "./flow/starterFlow.js";
 
 export async function runSeed() {
   await seedDefaultIntents();
@@ -27,8 +27,7 @@ export async function runSeed() {
     await prisma.callFlow.create({
       data: {
         version: 1,
-        openingTemplate:
-          "שלום {{customer_full_name}}, מדברת נציגת YES. שיחה זו מוקלטת לצורכי איכות. יש לי הצעה מיוחדת עבורך היום.",
+        openingTemplate: SIGAL_OPENING.replace(/\{\{agent_name\}\}/g, "סיגל"),
         stagesJson: JSON.stringify([
           { id: "greeting", prompt: "האם זה זמן נוח?", next: "pitch" },
           { id: "pitch", prompt: "חבילת טריפל מ-149 שקלים.", next: "closing" },
@@ -47,6 +46,7 @@ export async function runSeed() {
     });
   } else {
     await ensureStarterGraphPublished();
+    await migrateToSigalFlowIfNeeded();
   }
 
   await refreshProductKnowledge();

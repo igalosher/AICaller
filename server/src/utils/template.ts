@@ -2,10 +2,11 @@ export function resolveTemplate(
   template: string,
   variables: Record<string, string>,
 ): string {
+  const vars: Record<string, string> = { agent_name: "סיגל", ...variables };
   return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
-    if (key === "customer_name" && variables.customer_full_name) {
-      return variables.customer_full_name;
+    if (key === "customer_name" && vars.customer_full_name) {
+      return vars.customer_full_name;
     }
-    return variables[key] ?? "";
+    return vars[key] ?? "";
   });
 }

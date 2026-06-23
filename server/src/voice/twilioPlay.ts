@@ -4,12 +4,12 @@ import { getTelephonyConfig } from "../services/settingsService.js";
 import { prisma } from "../db.js";
 import { logger } from "../logger.js";
 
-function webhookBaseUrl(): string {
-  return process.env.TWILIO_WEBHOOK_BASE_URL ?? "https://localhost";
+async function resolveWebhookBaseUrl(): Promise<string> {
+  const config = await getTelephonyConfig();
+  return config.webhookBaseUrl ?? process.env.TWILIO_WEBHOOK_BASE_URL ?? "http://localhost:3001";
 }
 
-function mediaStreamWsUrl(): string {
-  const base = webhookBaseUrl();
+function mediaStreamWsUrl(base: string): string {
   const wsBase = base.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
   return `${wsBase}/api/webhooks/twilio/media`;
 }
@@ -23,28 +23,34 @@ function escapeXml(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
-function streamBlock(callId: string): string {
-  const streamUrl = escapeXml(mediaStreamWsUrl());
+function streamBlock(callId: string, base: string): string {
+  const streamUrl = escapeXml(mediaStreamWsUrl(base));
   const escapedCallId = escapeXml(callId);
   return `<Start><Stream url="${streamUrl}"><Parameter name="callId" value="${escapedCallId}"/></Stream></Start>`;
 }
 
-export function buildHoldTwiml(callId: string): string {
+export async function buildHoldTwiml(callId: string): Promise<string> {
+  const base = await resolveWebhookBaseUrl();
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  ${streamBlock(callId)}
+  ${streamBlock(callId, base)}
   <Pause length="600"/>
 </Response>`;
 }
 
 /** Play ElevenLabs audio, keep call open, listen via Deepgram on background media stream. */
-export function buildPlayListenTwiml(callId: string, playUrl: string, endCall: boolean): string {
+export function buildPlayListenTwiml(
+  callId: string,
+  playUrl: string,
+  endCall: boolean,
+  base: string,
+): string {
   const escapedPlay = escapeXml(playUrl);
 
   if (endCall) {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  ${streamBlock(callId)}
+  ${streamBlock(callId, base)}
   <Play>${escapedPlay}</Play>
   <Hangup/>
 </Response>`;
@@ -52,7 +58,7 @@ export function buildPlayListenTwiml(callId: string, playUrl: string, endCall: b
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  ${streamBlock(callId)}
+  ${streamBlock(callId, base)}
   <Play>${escapedPlay}</Play>
   <Pause length="600"/>
 </Response>`;
@@ -65,8 +71,9 @@ export async function buildTwimlForSpeech(
 ): Promise<string | null> {
   const clipId = await createPlayClip(text);
   if (!clipId) return null;
-  const playUrl = `${webhookBaseUrl()}/api/webhooks/twilio/audio/${clipId}`;
-  return buildPlayListenTwiml(callId, playUrl, endCall);
+  const base = await resolveWebhookBaseUrl();
+  const playUrl = `${base}/api/webhooks/twilio/audio/${clipId}`;
+  return buildPlayListenTwiml(callId, playUrl, endCall, base);
 }
 
 export async function playOnTwilioCall(

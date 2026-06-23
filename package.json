@@ -4,10 +4,12 @@
   "workspaces": ["server", "client"],
   "scripts": {
     "dev": "concurrently \"npm run dev -w server\" \"npm run dev -w client\"",
+    "dev:twilio": "node server/scripts/dev-with-tunnel.mjs",
     "dev:server": "npm run dev -w server",
     "dev:client": "npm run dev -w client",
     "db:migrate": "npm run db:migrate -w server",
-    "db:seed": "npm run db:seed -w server"
+    "db:seed": "npm run db:seed -w server",
+    "tunnel": "npx cloudflared tunnel --protocol http2 --url http://127.0.0.1:3001"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

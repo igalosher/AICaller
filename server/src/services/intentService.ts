@@ -8,6 +8,24 @@ import {
 } from "./catalogChannelLookup.js";
 import type { ClassificationResult } from "../flow/graphTypes.js";
 
+export interface ClassifyOptions {
+  awaitingRefusalConfirm?: boolean;
+  currentNodeId?: string;
+}
+
+const INSULT_PATTERNS = [
+  "טמבל",
+  "מטומטם",
+  "idiot",
+  "stupid",
+  "לעזאזל",
+  "תזדיין",
+  "מזדיין",
+  "חרא",
+  "בן זונה",
+  "שרמוטה",
+];
+
 const DEFAULT_INTENTS = [
   {
     id: "greeting_ack",
@@ -50,6 +68,42 @@ const DEFAULT_INTENTS = [
     labelHe: "מסכים לרכוש",
     category: "closing",
     examples: ["אני מסכים", "רוצה לסגור", "בוא נסגור", "אני רוצה את החבילה"],
+  },
+  {
+    id: "small_talk",
+    labelHe: "שיחת חולין",
+    category: "tone",
+    examples: ["מה שלומך", "מה נשמע", "איך את", "איך הולך", "מה קורה"],
+  },
+  {
+    id: "insult_profanity",
+    labelHe: "עלבון / קללות",
+    category: "tone",
+    examples: ["טמבל", "idiot", "לעזאזל", "תזדיין", "חרא"],
+  },
+  {
+    id: "ask_internet",
+    labelHe: "שאלה על אינטרנט",
+    category: "product",
+    examples: ["מהירות אינטרנט", "איזה אינטרנט", "כמה מגה", "מהירות גלישה", "סיבים"],
+  },
+  {
+    id: "ask_router_rental",
+    labelHe: "שכירות נתב",
+    category: "product",
+    examples: ["כמה עולה הנתב", "שכירות נתב", "מחיר נתב", "כמה שוכרים נתב"],
+  },
+  {
+    id: "ask_options_compare",
+    labelHe: "השוואת אפשרויות",
+    category: "product",
+    examples: ["מה האפשרויות", "מה עוד יש", "מה ההבדל", "איזה חבילות יש", "מה אפשר לקבל"],
+  },
+  {
+    id: "not_interested_confirmed",
+    labelHe: "סירוב מאושר",
+    category: "objection",
+    examples: ["כן לא מעוניין", "בטוח", "בטח", "כן אני בטוח", "באמת לא"],
   },
   {
     id: "unknown",
@@ -214,7 +268,84 @@ async function llmClassify(
   }
 }
 
+function matchesInsult(norm: string): boolean {
+  return INSULT_PATTERNS.some((p) => norm.includes(p));
+}
+
+function matchesSmallTalk(norm: string): boolean {
+  return (
+    norm.includes("מה שלומך") ||
+    norm.includes("מה נשמע") ||
+    norm.includes("איך את") ||
+    norm.includes("איך הולך") ||
+    norm.includes("מה קורה")
+  );
+}
+
+function ruleToneAndProduct(utterance: string): ClassificationResult | null {
+  const norm = normalize(utterance);
+  if (matchesInsult(norm)) {
+    return { intentId: "insult_profanity", confidence: 0.95, entities: {}, classifier: "rule" };
+  }
+  if (matchesSmallTalk(norm)) {
+    return { intentId: "small_talk", confidence: 0.9, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("נתב") && (norm.includes("כמה") || norm.includes("שכירות") || norm.includes("מחיר"))) {
+    return { intentId: "ask_router_rental", confidence: 0.88, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("אינטרנט") || norm.includes("מהירות") || norm.includes("סיבים") || norm.includes("מגה")) {
+    return { intentId: "ask_internet", confidence: 0.85, entities: {}, classifier: "rule" };
+  }
+  if (
+    norm.includes("אפשרויות") ||
+    norm.includes("מה עוד") ||
+    norm.includes("הבדל") ||
+    norm.includes("מה יש לכם")
+  ) {
+    return { intentId: "ask_options_compare", confidence: 0.82, entities: {}, classifier: "rule" };
+  }
+  return null;
+}
+
+function classifyRefusalConfirm(utterance: string, awaiting: boolean): ClassificationResult | null {
+  const norm = normalize(utterance);
+  if (!awaiting) return null;
+  if (
+    norm.includes("בטוח") ||
+    norm.includes("בטח") ||
+    norm.includes("כן לא") ||
+    norm === "כן" ||
+    norm.includes("לא מעוניין")
+  ) {
+    return {
+      intentId: "not_interested_confirmed",
+      confidence: 0.9,
+      entities: {},
+      classifier: "rule",
+      debug: { awaitingRefusalConfirm: true },
+    };
+  }
+  if (
+    norm.includes("לא בטוח") ||
+    norm.includes("תשמעי") ||
+    norm.includes("אפשר לשמוע") ||
+    norm.includes("כן תסבירי")
+  ) {
+    return {
+      intentId: "greeting_ack",
+      confidence: 0.85,
+      entities: {},
+      classifier: "rule",
+      debug: { reconsidered: true },
+    };
+  }
+  return null;
+}
+
 function keywordFallback(utterance: string): ClassificationResult {
+  const tone = ruleToneAndProduct(utterance);
+  if (tone) return tone;
+
   const norm = normalize(utterance);
   if (norm.includes("מחיר") || norm.includes("כמה") || norm.includes("יקר")) {
     return { intentId: "price_objection", confidence: 0.75, entities: {}, classifier: "rule" };
@@ -240,11 +371,29 @@ function keywordFallback(utterance: string): ClassificationResult {
   return { intentId: "unknown", confidence: 0.3, entities: {}, classifier: "rule" };
 }
 
-export async function classifyUtterance(utterance: string): Promise<ClassificationResult> {
+export async function classifyUtterance(
+  utterance: string,
+  options: ClassifyOptions = {},
+): Promise<ClassificationResult> {
+  const awaiting =
+    options.awaitingRefusalConfirm ||
+    options.currentNodeId === "listen_confirm" ||
+    options.currentNodeId === "route_confirm";
+
+  const confirmResult = classifyRefusalConfirm(utterance, awaiting);
+  if (confirmResult) return confirmResult;
+
+  const toneEarly = ruleToneAndProduct(utterance);
+  if (toneEarly) return toneEarly;
+
   const intents = await prisma.intent.findMany({ where: { active: true } });
   const examples = await prisma.intentExample.findMany();
   const rule = await ruleClassify(utterance, examples);
   let result = rule ?? (await llmClassify(utterance, intents)) ?? keywordFallback(utterance);
+
+  if (!awaiting && result.intentId === "not_interested_confirmed") {
+    result = { ...result, intentId: "not_interested", confidence: result.confidence };
+  }
 
   const channelHit = await extractChannelFromUtterance(utterance);
   if (channelHit) {

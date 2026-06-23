@@ -32,6 +32,8 @@ import {
   persistClassification,
 } from "./intentService.js";
 import { describeChannel } from "./catalogChannelLookup.js";
+import { productTools } from "./productKnowledge.js";
+import { SOLD_GOODBYE } from "../flow/starterFlow.js";
 import type { SpeakNode } from "../flow/graphTypes.js";
 import type { CallOutcome, CallStatus, CallFlow, Contact } from "@prisma/client";
 
@@ -50,6 +52,7 @@ function templateVars(firstName: string, familyName: string) {
     customer_name: full,
     customer_full_name: full,
     customer_first_name: firstName,
+    agent_name: "סיגל",
   };
 }
 
@@ -73,24 +76,60 @@ async function buildChannelContext(channelName?: string): Promise<string | undef
   return `${ch.name}: ${ch.description ?? "ערוץ בקטלוג YES"}. כלול ב: ${ch.packets.join(", ")}`;
 }
 
+async function buildProductContext(
+  intentId: string,
+  entities?: { channel?: string; packet?: string },
+): Promise<{
+  channelContext?: string;
+  packetContext?: string;
+  internetContext?: string;
+  routerContext?: string;
+  optionsContext?: string;
+}> {
+  const channelContext = entities?.channel ? await buildChannelContext(entities.channel) : undefined;
+  const packetContext = entities?.packet;
+
+  if (intentId === "ask_internet") {
+    const tiers = await productTools.list_internet_tiers();
+    return {
+      channelContext,
+      packetContext,
+      internetContext: tiers.map((t) => `${t.name}: ${t.downloadMbps} מגה, ${t.priceMonthly} ש״ח`).join("; "),
+    };
+  }
+  if (intentId === "ask_router_rental") {
+    const router = await productTools.router_rental_info();
+    return { channelContext, packetContext, routerContext: router.summaryHe };
+  }
+  if (intentId === "ask_options_compare") {
+    const options = await productTools.compare_options();
+    return {
+      channelContext,
+      packetContext,
+      optionsContext: JSON.stringify(options),
+    };
+  }
+  return { channelContext, packetContext };
+}
+
 async function speakFromNode(
   node: SpeakNode,
   contact: { firstName: string; familyName: string },
   userMessage?: string,
   entities?: { channel?: string; packet?: string },
+  intentId?: string,
 ): Promise<string> {
   const vars = templateVars(contact.firstName, contact.familyName);
   let text = node.text;
   text = text.replace(/\{\{(\w+)\}\}/g, (_match: string, key: string) => vars[key as keyof typeof vars] ?? "");
 
   if (node.useLlm || userMessage) {
-    const channelContext = await buildChannelContext(entities?.channel);
+    const productCtx = await buildProductContext(intentId ?? "", entities);
     const reply = await generateSalesReply(userMessage ?? text, {
       customerFirstName: contact.firstName,
       stagePrompt: text,
       nodeText: text,
-      channelContext,
-      packetContext: entities?.packet,
+      ...productCtx,
       isOpeningTurn: !userMessage,
     });
     return reply.text;
@@ -347,7 +386,11 @@ export async function processCustomerTurn(callId: string, text: string): Promise
   const segment = await addTranscript(callId, "customer", text);
   broadcastCallEvent({ type: "transcript", callId, speaker: "customer", text });
 
-  const classification = await classifyUtterance(text);
+  const classification = await classifyUtterance(text, {
+    currentNodeId: call.currentNodeId ?? undefined,
+    awaitingRefusalConfirm:
+      call.currentNodeId === "listen_confirm" || call.currentNodeId === "route_confirm",
+  });
   await persistClassification(segment.id, callId, classification);
   broadcastCallEvent({
     type: "classification",
@@ -396,37 +439,43 @@ async function processGraphTurn(
     node = engine.advanceByClassification(classification, thresholds) ?? undefined;
   }
 
+  let sayText = "אשמח להמשיך לעזור לך.";
+  let spokeThisTurn = false;
+  while (node?.type === "speak") {
+    sayText = await speakFromNode(
+      node,
+      call.contact,
+      text,
+      classification.entities,
+      classification.intentId,
+    );
+    spokeThisTurn = true;
+    const edge = engine.getNextAutoEdge(node.id);
+    if (!edge) break;
+    engine.currentNodeId = edge.target;
+    node = engine.getCurrentNode();
+  }
+
   if (engine.isEndNode(node)) {
     const outcome = node.outcome ?? detectOutcome(text) ?? "none";
     const endOutcome =
       outcome === "sold" || outcome === "refused" || outcome === "callback"
         ? outcome
         : (detectOutcome(text) ?? "none");
-    const sayText =
-      endOutcome === "refused"
+    const finalText = spokeThisTurn
+      ? sayText
+      : endOutcome === "refused"
         ? "תודה על זמנך. יום נעים!"
         : endOutcome === "callback"
           ? "נחזור אליך בזמן שנוח לך."
           : endOutcome === "sold"
-            ? "מצוין! נסכם את הפרטים ונשלח אישור."
+            ? SOLD_GOODBYE
             : "תודה רבה על השיחה.";
-    await addTranscript(callId, "ai", sayText);
-    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
+    await addTranscript(callId, "ai", finalText);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: finalText });
     if (endOutcome !== "none") {
       await finalizeCall(callId, endOutcome);
-      return { sayText, endCall: true };
-    }
-  }
-
-  node = engine.advanceThroughSpeakChain() ?? engine.getCurrentNode();
-
-  let sayText = "אשמח להמשיך לעזור לך.";
-  if (node?.type === "speak") {
-    sayText = await speakFromNode(node, call.contact, text, classification.entities);
-    const edge = engine.getNextAutoEdge(node.id);
-    if (edge) {
-      engine.currentNodeId = edge.target;
-      engine.advanceThroughSpeakChain();
+      return { sayText: finalText, endCall: true };
     }
   }
 
@@ -435,12 +484,19 @@ async function processGraphTurn(
     data: { currentNodeId: engine.currentNodeId, currentStage: engine.currentNodeId },
   });
 
-  const outcome = detectOutcome(text + " " + sayText);
-  if (outcome === "refused" || outcome === "sold" || outcome === "callback") {
-    await addTranscript(callId, "ai", sayText);
-    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
+  const purchaseThreshold = thresholds.agree_purchase ?? 0.7;
+  const outcome =
+    classification.intentId === "agree_purchase" && classification.confidence >= purchaseThreshold
+      ? "sold"
+      : classification.intentId === "callback"
+        ? "callback"
+        : detectOutcome(text);
+  if (outcome === "sold" || outcome === "callback") {
+    const closingText = outcome === "sold" ? SOLD_GOODBYE : sayText;
+    await addTranscript(callId, "ai", closingText);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: closingText });
     await finalizeCall(callId, outcome);
-    return { sayText, endCall: true };
+    return { sayText: closingText, endCall: true };
   }
 
   await addTranscript(callId, "ai", sayText);
@@ -463,10 +519,11 @@ async function processLinearTurn(
   const outcome = reply.outcome ?? detectOutcome(text);
 
   if (outcome === "refused" || outcome === "sold" || outcome === "callback") {
-    await addTranscript(callId, "ai", reply.text);
-    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: reply.text });
+    const closingText = outcome === "sold" ? SOLD_GOODBYE : reply.text;
+    await addTranscript(callId, "ai", closingText);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: closingText });
     await finalizeCall(callId, outcome);
-    return { sayText: reply.text, endCall: true };
+    return { sayText: closingText, endCall: true };
   }
 
   engine.markSpokenOffset(engine.currentStageId, 0);

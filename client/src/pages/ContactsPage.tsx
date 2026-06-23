@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { isAxiosError } from "axios";
 import { callsApi, contactsApi } from "../api";
 import { StatusBadge } from "../components/StatusBadge";
+import type { ContactStatus } from "../types";
 
 type ContactForm = {
   id?: string;
@@ -11,7 +12,15 @@ type ContactForm = {
   familyName: string;
   phone: string;
   notes: string;
+  status?: ContactStatus;
 };
+
+const EDITABLE_STATUSES: { value: ContactStatus; label: string }[] = [
+  { value: "pending", label: "ממתין" },
+  { value: "sold", label: "נמכר" },
+  { value: "callback", label: "לחזור" },
+  { value: "refused", label: "סירב" },
+];
 
 function getErrorMessage(err: unknown, fallback: string): string {
   if (isAxiosError(err) && err.response?.data?.error) {
@@ -46,6 +55,7 @@ export function ContactsPage() {
         familyName: form.familyName.trim(),
         phone: form.phone.trim(),
         notes: form.notes.trim() || undefined,
+        ...(form.id && form.status ? { status: form.status } : {}),
       };
       if (form.id) {
         return contactsApi.update(form.id, payload);
@@ -55,6 +65,7 @@ export function ContactsPage() {
     onMutate: () => setSaveError(null),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["contacts"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
       setModalOpen(false);
       setEditing(null);
     },
@@ -186,6 +197,7 @@ export function ContactsPage() {
                           familyName: c.familyName ?? "",
                           phone: c.phone,
                           notes: c.notes ?? "",
+                          status: c.status,
                         });
                         setSaveError(null);
                         setModalOpen(true);
@@ -238,6 +250,26 @@ export function ContactsPage() {
                 value={editing.notes}
                 onChange={(e) => setEditing({ ...editing, notes: e.target.value })}
               />
+              {editing.id && editing.status === "in_call" ? (
+                <p className="text-sm text-slate-600">בשיחה — לא ניתן לשנות סטטוס במהלך שיחה</p>
+              ) : editing.id ? (
+                <div>
+                  <label className="mb-1 block text-sm text-slate-600">סטטוס</label>
+                  <select
+                    className="w-full rounded-lg border px-3 py-2"
+                    value={editing.status ?? "pending"}
+                    onChange={(e) =>
+                      setEditing({ ...editing, status: e.target.value as ContactStatus })
+                    }
+                  >
+                    {EDITABLE_STATUSES.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
             </div>
             <div className="mt-4 flex justify-end gap-2">
               <button type="button" className="rounded-lg px-4 py-2" onClick={() => setModalOpen(false)}>

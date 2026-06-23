@@ -61,11 +61,36 @@ server.on("upgrade", (req, socket, head) => {
   socket.destroy();
 });
 
+async function warnIfWebhookUnreachable() {
+  if (process.env.TELEPHONY_PROVIDER !== "twilio") return;
+  const url = process.env.TWILIO_WEBHOOK_BASE_URL;
+  if (!url || url.includes("localhost")) {
+    logger.warn("TWILIO_WEBHOOK_BASE_URL is local — Twilio cannot reach it. Use: npm run dev:twilio");
+    return;
+  }
+  try {
+    const res = await fetch(`${url}/api/webhooks/twilio/voice?callId=startup`, {
+      method: "POST",
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) {
+      logger.warn({ status: res.status, url }, "Twilio webhook URL returned an error");
+    }
+  } catch (err) {
+    logger.warn(
+      { url },
+      "Twilio webhook URL unreachable — voice calls will show Application Error. Use: npm run dev:twilio",
+    );
+    logger.debug({ err }, "Webhook probe failed");
+  }
+}
+
 async function main() {
   await runSeed();
   await recoverStuckContacts();
   server.listen(port, () => {
     logger.info({ port }, "AICaller server started");
+    void warnIfWebhookUnreachable();
   });
 }
 

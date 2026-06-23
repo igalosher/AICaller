@@ -21,7 +21,7 @@ router.get("/twilio/audio/:clipId", (req, res) => {
   res.send(clip.buffer);
 });
 
-router.post("/twilio/voice", (req, res) => {
+router.post("/twilio/voice", async (req, res) => {
   const callId = req.query.callId as string;
   if (!callId) {
     res.type("text/xml");
@@ -31,7 +31,7 @@ router.post("/twilio/voice", (req, res) => {
 
   // Answer immediately so Twilio does not time out while we synthesize speech.
   res.type("text/xml");
-  res.send(buildHoldTwiml(callId));
+  res.send(await buildHoldTwiml(callId));
   void kickoffInitialVoice(callId);
 });
 

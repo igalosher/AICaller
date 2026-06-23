@@ -7,6 +7,11 @@ import {
   fuzzyMatchChannel,
   listCatalogChannels,
 } from "./catalogChannelLookup.js";
+import {
+  describeCatalogInternet,
+  listCatalogInternetTiers,
+  routerRentalInfo,
+} from "./catalogInternetLookup.js";
 
 export interface KnowledgePacket {
   id: string;
@@ -163,5 +168,40 @@ export const productTools = {
   },
   async list_catalog_channels() {
     return listCatalogChannels();
+  },
+  async list_internet_tiers() {
+    return listCatalogInternetTiers();
+  },
+  async describe_internet(name: string) {
+    return describeCatalogInternet(name);
+  },
+  async router_rental_info() {
+    return routerRentalInfo();
+  },
+  async compare_options() {
+    const { packets, tiers } = await getKnowledgeIndex();
+    const catalogTiers = await listCatalogInternetTiers();
+    const mergedTiers =
+      catalogTiers.length > 0
+        ? catalogTiers.map((t) => ({
+            nameHe: t.name,
+            downloadMbps: t.downloadMbps,
+            uploadMbps: t.uploadMbps,
+            priceMonthly: t.priceMonthly,
+          }))
+        : tiers.map((t) => ({
+            nameHe: t.nameHe,
+            downloadMbps: t.downloadMbps,
+            uploadMbps: t.uploadMbps,
+            priceMonthly: t.priceMonthly,
+          }));
+    return {
+      packets: packets.map((p) => ({
+        nameHe: p.nameHe,
+        priceMonthly: p.priceMonthly,
+        descriptionHe: p.descriptionHe,
+      })),
+      internetTiers: mergedTiers,
+    };
   },
 };
