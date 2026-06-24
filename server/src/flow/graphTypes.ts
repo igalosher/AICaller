@@ -51,7 +51,14 @@ export interface FlowGraph {
 export interface ClassificationResult {
   intentId: string;
   confidence: number;
-  entities: { channel?: string; channelId?: string; packet?: string };
+  entities: {
+    channel?: string;
+    channelId?: string;
+    packet?: string;
+    tv_count?: number;
+    monthly_price?: number;
+    address?: string;
+  };
   classifier: "rule" | "llm";
   debug?: Record<string, unknown>;
 }

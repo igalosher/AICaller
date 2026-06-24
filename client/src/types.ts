@@ -1,10 +1,17 @@
-export type ContactStatus = "pending" | "in_call" | "sold" | "callback" | "refused";
+export type ContactStatus = "pending" | "in_call" | "sold" | "callback" | "refused" | "blacklisted";
+export type ContactSex = "male" | "female";
+
+export const CONTACT_SEX_LABELS: Record<ContactSex, string> = {
+  male: "זכר",
+  female: "נקבה",
+};
 
 export interface Contact {
   id: string;
   firstName: string;
   familyName: string;
   phone: string;
+  sex: ContactSex;
   status: ContactStatus;
   notes?: string | null;
   createdAt: string;

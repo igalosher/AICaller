@@ -4,13 +4,15 @@ import { useNavigate } from "react-router-dom";
 import { isAxiosError } from "axios";
 import { callsApi, contactsApi } from "../api";
 import { StatusBadge } from "../components/StatusBadge";
-import type { ContactStatus } from "../types";
+import type { ContactSex, ContactStatus } from "../types";
+import { CONTACT_SEX_LABELS } from "../types";
 
 type ContactForm = {
   id?: string;
   firstName: string;
   familyName: string;
   phone: string;
+  sex: ContactSex;
   notes: string;
   status?: ContactStatus;
 };
@@ -20,6 +22,7 @@ const EDITABLE_STATUSES: { value: ContactStatus; label: string }[] = [
   { value: "sold", label: "נמכר" },
   { value: "callback", label: "לחזור" },
   { value: "refused", label: "סירב" },
+  { value: "blacklisted", label: "הוסר" },
 ];
 
 function getErrorMessage(err: unknown, fallback: string): string {
@@ -29,7 +32,7 @@ function getErrorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
-const emptyForm: ContactForm = { firstName: "", familyName: "", phone: "", notes: "" };
+const emptyForm: ContactForm = { firstName: "", familyName: "", phone: "", sex: "male", notes: "" };
 
 export function ContactsPage() {
   const navigate = useNavigate();
@@ -54,6 +57,7 @@ export function ContactsPage() {
         firstName: form.firstName.trim(),
         familyName: form.familyName.trim(),
         phone: form.phone.trim(),
+        sex: form.sex,
         notes: form.notes.trim() || undefined,
         ...(form.id && form.status ? { status: form.status } : {}),
       };
@@ -154,6 +158,7 @@ export function ContactsPage() {
           <option value="sold">נמכר</option>
           <option value="callback">לחזור</option>
           <option value="refused">סירב</option>
+          <option value="blacklisted">הוסר</option>
         </select>
       </div>
 
@@ -163,6 +168,7 @@ export function ContactsPage() {
             <tr>
               <th className="px-4 py-3 text-right">שם פרטי</th>
               <th className="px-4 py-3 text-right">שם משפחה</th>
+              <th className="px-4 py-3 text-right">מין</th>
               <th className="px-4 py-3 text-right">טלפון</th>
               <th className="px-4 py-3 text-right">סטטוס</th>
               <th className="px-4 py-3 text-right">פעולות</th>
@@ -173,6 +179,7 @@ export function ContactsPage() {
               <tr key={c.id} className="border-t border-slate-100">
                 <td className="px-4 py-3">{c.firstName}</td>
                 <td className="px-4 py-3">{c.familyName || "—"}</td>
+                <td className="px-4 py-3">{CONTACT_SEX_LABELS[c.sex ?? "male"]}</td>
                 <td className="px-4 py-3">{c.phone}</td>
                 <td className="px-4 py-3">
                   <StatusBadge status={c.status} />
@@ -182,7 +189,7 @@ export function ContactsPage() {
                     <button
                       type="button"
                       className="text-blue-600 disabled:text-slate-400"
-                      disabled={c.status === "refused" || callingId === c.id}
+                      disabled={c.status === "refused" || c.status === "blacklisted" || callingId === c.id}
                       onClick={() => callMutation.mutate(c.id)}
                     >
                       {callingId === c.id ? "מחייג..." : "התקשר"}
@@ -196,6 +203,7 @@ export function ContactsPage() {
                           firstName: c.firstName,
                           familyName: c.familyName ?? "",
                           phone: c.phone,
+                          sex: c.sex ?? "male",
                           notes: c.notes ?? "",
                           status: c.status,
                         });
@@ -238,6 +246,19 @@ export function ContactsPage() {
                 value={editing.familyName}
                 onChange={(e) => setEditing({ ...editing, familyName: e.target.value })}
               />
+              <div>
+                <label className="mb-1 block text-sm text-slate-600">מין</label>
+                <select
+                  className="w-full rounded-lg border px-3 py-2"
+                  value={editing.sex}
+                  onChange={(e) =>
+                    setEditing({ ...editing, sex: e.target.value as ContactSex })
+                  }
+                >
+                  <option value="male">{CONTACT_SEX_LABELS.male}</option>
+                  <option value="female">{CONTACT_SEX_LABELS.female}</option>
+                </select>
+              </div>
               <input
                 className="w-full rounded-lg border px-3 py-2"
                 placeholder="טלפון (05X...)"

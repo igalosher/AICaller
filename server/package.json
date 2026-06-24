@@ -12,7 +12,10 @@
     "db:generate": "prisma generate",
     "postinstall": "prisma generate",
     "test:twilio": "tsx scripts/test-twilio.ts",
-    "test:visual-flow": "tsx scripts/test-visual-flow.ts"
+    "test:visual-flow": "tsx scripts/test-visual-flow.ts",
+    "test:sigal-miniflow": "tsx scripts/test-sigal-miniflow.ts",
+    "test:sigal-graph-flow": "tsx scripts/test-sigal-graph-flow.ts",
+    "test:staged-flow": "tsx scripts/test-staged-flow.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.0",

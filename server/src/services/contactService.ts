@@ -6,12 +6,13 @@ import {
 } from "./contactStatus.js";
 import { isValidIsraeliPhone, normalizeIsraeliPhone } from "../utils/phone.js";
 import { contactFullName } from "../utils/name.js";
-import type { ContactStatus } from "@prisma/client";
+import type { ContactStatus, ContactSex } from "@prisma/client";
 
 export async function createContact(input: {
   firstName: string;
   familyName?: string;
   phone: string;
+  sex?: ContactSex;
   notes?: string;
 }) {
   if (!isValidIsraeliPhone(input.phone)) {
@@ -29,6 +30,7 @@ export async function createContact(input: {
       firstName: input.firstName.trim(),
       familyName: input.familyName?.trim() ?? "",
       phone,
+      sex: input.sex ?? "male",
       notes: input.notes,
     },
   });
@@ -87,6 +89,7 @@ export async function updateContact(
     firstName?: string;
     familyName?: string;
     phone?: string;
+    sex?: ContactSex;
     notes?: string;
     status?: ContactStatus;
   },
@@ -134,6 +137,9 @@ export function ensureCallable(status: ContactStatus): void {
   if (!isCallable(status)) {
     if (status === "refused") {
       throw new AppError(403, "לא ניתן להתקשר לאיש קשר שסירב", "CONTACT_REFUSED");
+    }
+    if (status === "blacklisted") {
+      throw new AppError(403, "לא ניתן להתקשר לאיש קשר שהוסר מהרשימה", "CONTACT_BLACKLISTED");
     }
     throw new AppError(409, "איש הקשר כבר בשיחה", "CONTACT_IN_CALL");
   }

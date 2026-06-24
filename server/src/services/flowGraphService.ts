@@ -1,7 +1,12 @@
 import { prisma } from "../db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { validateFlowGraph } from "../flow/graphValidation.js";
-import { createDefaultStarterFlow, isSigalFlowGraph, SIGAL_OPENING, SIGAL_QUALIFY, SOLD_GOODBYE } from "../flow/starterFlow.js";
+import { createSigalMiniFlowGraph, isSigalMiniFlowGraph, STAGED_OPENING } from "../flow/sigalMiniFlow.js";
+import {
+  SIGAL_OPENING,
+  SIGAL_QUALIFY,
+  SOLD_GOODBYE,
+} from "../flow/starterFlow.js";
 import { linearFlowToGraph } from "../flow/linearToGraph.js";
 import { parseCallFlow } from "./callFlowService.js";
 import type { FlowGraph } from "../flow/graphTypes.js";
@@ -18,11 +23,26 @@ export async function getActiveFlowGraph(): Promise<FlowGraph | null> {
 export async function getDraftGraph(flowId: string): Promise<FlowGraph> {
   const flow = await prisma.callFlow.findUnique({ where: { id: flowId } });
   if (!flow) throw new AppError(404, "זרימת שיחה לא נמצאה");
-  const json = flow.draftGraphJson !== "{}" ? flow.draftGraphJson : flow.publishedGraphJson;
-  if (!json || json === "{}") {
-    return createDefaultStarterFlow();
+
+  const published =
+    flow.publishedGraphJson && flow.publishedGraphJson !== "{}"
+      ? (JSON.parse(flow.publishedGraphJson) as FlowGraph)
+      : null;
+  const draftJson = flow.draftGraphJson !== "{}" ? flow.draftGraphJson : null;
+  const draft = draftJson ? (JSON.parse(draftJson) as FlowGraph) : null;
+
+  if (draft && published && isSigalMiniFlowGraph(published)) {
+    const draftLooksTruncated =
+      (draft.nodes?.length ?? 0) < 10 && (published.nodes?.length ?? 0) >= 10;
+    const publishedIntentEdges = published.edges.filter((e) => e.intentId).length;
+    const draftIntentEdges = draft.edges.filter((e) => e.intentId).length;
+    const draftLostRouting = publishedIntentEdges >= 10 && draftIntentEdges < publishedIntentEdges / 2;
+    if (draftLooksTruncated || draftLostRouting) return published;
   }
-  return JSON.parse(json) as FlowGraph;
+
+  if (draft) return draft;
+  if (published) return published;
+  return createSigalMiniFlowGraph();
 }
 
 export async function saveDraftGraph(flowId: string, graph: FlowGraph) {
@@ -134,17 +154,7 @@ export function patchSigalOpeningCopy(graph: FlowGraph): FlowGraph {
   );
 }
 
-function graphNeedsSigalPatch(graph: FlowGraph): boolean {
-  const start = graph.nodes.find((n) => n.id === "start" && n.type === "speak");
-  const hasDealsOpening = Boolean(start?.type === "speak" && start.text.includes("מבצע"));
-  const optionsToClose = graph.edges.some((e) => e.source === "options_reply" && e.target === "close");
-  const agreeToEnd = graph.edges.some(
-    (e) => e.source === "route_close" && e.intentId === "agree_purchase" && e.target === "end_sold",
-  );
-  return !isSigalFlowGraph(graph) || !hasDealsOpening || optionsToClose || agreeToEnd;
-}
-
-export async function migrateToSigalFlowIfNeeded(): Promise<void> {
+export async function migrateToSigalMiniFlowIfNeeded(): Promise<void> {
   const active = await prisma.callFlow.findFirst({
     where: { isActive: true },
     orderBy: { version: "desc" },
@@ -152,28 +162,33 @@ export async function migrateToSigalFlowIfNeeded(): Promise<void> {
   if (!active) return;
 
   const json = active.publishedGraphJson !== "{}" ? active.publishedGraphJson : active.draftGraphJson;
-  if (!json || json === "{}") {
-    await ensureStarterGraphPublished();
-    return;
+  if (json && json !== "{}") {
+    const existing = JSON.parse(json) as FlowGraph;
+    const validMini =
+      isSigalMiniFlowGraph(existing) && validateFlowGraph(existing).length === 0;
+    if (validMini) return;
   }
 
-  const existing = JSON.parse(json) as FlowGraph;
-  if (!graphNeedsSigalPatch(existing)) return;
-
-  const graph = isSigalFlowGraph(existing)
-    ? patchSigalOpeningCopy(existing)
-    : createDefaultStarterFlow();
-  const openingTemplate = SIGAL_OPENING.replace(/\{\{agent_name\}\}/g, "סיגל");
-
+  const graph = createSigalMiniFlowGraph();
   await prisma.callFlow.update({
     where: { id: active.id },
     data: {
-      openingTemplate,
-      draftGraphJson: JSON.stringify(graph),
+      openingTemplate: STAGED_OPENING,
+      stagesJson: "[]",
       publishedGraphJson: JSON.stringify(graph),
+      draftGraphJson: JSON.stringify(graph),
       graphPublishedAt: new Date(),
     },
   });
+}
+
+/** @deprecated use migrateToSigalMiniFlowIfNeeded */
+export async function migrateToStagedFlowIfNeeded(): Promise<void> {
+  return migrateToSigalMiniFlowIfNeeded();
+}
+
+export async function migrateToSigalFlowIfNeeded(): Promise<void> {
+  return migrateToSigalMiniFlowIfNeeded();
 }
 
 export async function ensureStarterGraphPublished(): Promise<void> {
@@ -185,7 +200,7 @@ export async function ensureStarterGraphPublished(): Promise<void> {
 
   if (active.publishedGraphJson && active.publishedGraphJson !== "{}") return;
 
-  const graph = createDefaultStarterFlow();
+  const graph = createSigalMiniFlowGraph();
   await prisma.callFlow.update({
     where: { id: active.id },
     data: {

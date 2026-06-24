@@ -25,7 +25,24 @@ import { playOnTwilioCall } from "../voice/twilioPlay.js";
 import { toTelephonyError } from "../telephony/errors.js";
 import { logger } from "../logger.js";
 import { createEngineFromGraph, GraphFlowEngine } from "../flow/graphFlowEngine.js";
+import {
+  getListenCheckpoint,
+  isProductQaIntent,
+  parseGraphContext,
+  serializeGraphContext,
+  speakNodeForListen,
+} from "../flow/graphFlowRuntime.js";
+import { OPT_OUT_GOODBYE } from "../flow/sigalMiniFlow.js";
+import { lookupFiberAvailability } from "./fiberLookup.js";
 import { getPublishedGraphForCall } from "./flowGraphService.js";
+import { parseStagedFlow } from "../flow/stagedFlowTypes.js";
+import { StagedFlowEngine } from "../flow/stagedFlowEngine.js";
+import {
+  persistStagedEngineState,
+  prepareStagedOpening,
+  processStagedUtterance,
+  restoreStagedEngine,
+} from "../flow/stagedFlowRuntime.js";
 import {
   classifyUtterance,
   getIntentThresholds,
@@ -41,10 +58,12 @@ export type VoiceTurnResult = { sayText: string; endCall: boolean };
 
 type SessionEngine =
   | { mode: "graph"; engine: GraphFlowEngine }
-  | { mode: "linear"; engine: CallFlowEngine };
+  | { mode: "linear"; engine: CallFlowEngine }
+  | { mode: "staged"; engine: StagedFlowEngine };
 
 const activeSessions = new Map<string, { tts?: TtsSession; session: SessionEngine }>();
 const voiceSessionsStarted = new Set<string>();
+const stagedSilenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function templateVars(firstName: string, familyName: string) {
   const full = contactFullName(firstName, familyName);
@@ -66,7 +85,35 @@ function createSessionEngine(flow: {
   if (graph) {
     return { mode: "graph", engine: createEngineFromGraph(JSON.stringify(graph)) };
   }
+  const staged = parseStagedFlow(flow.stagesJson);
+  if (staged) {
+    return { mode: "staged", engine: restoreStagedEngine(staged, undefined, null, "{}") };
+  }
   return { mode: "linear", engine: createEngineFromFlow(flow) };
+}
+
+function clearStagedSilence(callId: string): void {
+  const t = stagedSilenceTimers.get(callId);
+  if (t) {
+    clearTimeout(t);
+    stagedSilenceTimers.delete(callId);
+  }
+}
+
+function scheduleStagedSilence(callId: string, sec?: number): void {
+  clearStagedSilence(callId);
+  if (!sec || sec <= 0) return;
+  const timer = setTimeout(() => {
+    void handleStagedSilence(callId);
+  }, sec * 1000);
+  stagedSilenceTimers.set(callId, timer);
+}
+
+async function handleStagedSilence(callId: string): Promise<void> {
+  stagedSilenceTimers.delete(callId);
+  const session = activeSessions.get(callId);
+  if (session?.session.mode !== "staged") return;
+  await handleCustomerSpeech(callId, "");
 }
 
 async function buildChannelContext(channelName?: string): Promise<string | undefined> {
@@ -175,15 +222,19 @@ export async function startCall(contactId: string) {
 
   const flow = await getActiveCallFlow();
   const graph = getPublishedGraphForCall(flow);
-  const startNodeId = graph?.startNodeId ?? JSON.parse(flow.stagesJson)[0]?.id ?? "greeting";
+  const staged = parseStagedFlow(flow.stagesJson);
+  const startStageId =
+    graph?.startNodeId ?? staged?.stages[0]?.id ?? JSON.parse(flow.stagesJson)[0]?.id ?? "opening";
 
   const call = await prisma.call.create({
     data: {
       contactId,
       flowVersionId: flow.id,
       status: "dialing",
-      currentStage: startNodeId,
-      currentNodeId: startNodeId,
+      currentStage: startStageId,
+      currentNodeId: graph ? startStageId : undefined,
+      currentSubflowId: null,
+      contextJson: "{}",
     },
   });
 
@@ -249,16 +300,20 @@ export async function updateCallStatus(
   if (status === "ended" || status === "failed" || status === "no_answer" || status === "busy") {
     activeSessions.delete(callId);
     voiceSessionsStarted.delete(callId);
+    clearStagedSilence(callId);
     if (call.contact.status === "in_call") {
-      const newStatus =
-        outcome === "sold"
-          ? "sold"
-          : outcome === "refused"
-            ? "refused"
-            : outcome === "callback"
-              ? "callback"
-              : "pending";
-      await transitionContactStatus(call.contactId, newStatus);
+      const fresh = await prisma.contact.findUnique({ where: { id: call.contactId } });
+      if (fresh?.status !== "blacklisted") {
+        const newStatus =
+          outcome === "sold"
+            ? "sold"
+            : outcome === "refused"
+              ? "refused"
+              : outcome === "callback"
+                ? "callback"
+                : "pending";
+        await transitionContactStatus(call.contactId, newStatus);
+      }
     }
     broadcastCallEvent({
       type: "call_ended",
@@ -315,18 +370,37 @@ export async function prepareInitialVoiceTurn(callId: string): Promise<VoiceTurn
   if (call.currentNodeId && sessionEngine.mode === "graph") {
     sessionEngine.engine.currentNodeId = call.currentNodeId;
   }
+  if (sessionEngine.mode === "staged") {
+    const staged = parseStagedFlow(call.callFlow.stagesJson);
+    if (staged) {
+      sessionEngine.engine = restoreStagedEngine(
+        staged,
+        call.currentStage,
+        call.currentSubflowId,
+        call.contextJson,
+      );
+    }
+  } else if (call.currentStage && sessionEngine.mode === "linear") {
+    sessionEngine.engine.currentStageId = call.currentStage;
+  }
   activeSessions.set(callId, { session: sessionEngine });
 
   let sayText = "שלום.";
+  let scheduleSilenceSec: number | undefined;
+  let graphContext = parseGraphContext(call.contextJson);
 
-  if (sessionEngine.mode === "graph") {
+  if (sessionEngine.mode === "staged") {
+    const opening = await prepareStagedOpening(sessionEngine.engine, call.contact);
+    sayText = opening.sayText;
+    scheduleSilenceSec = opening.scheduleSilenceSec;
+  } else if (sessionEngine.mode === "graph") {
     const node = sessionEngine.engine.getCurrentNode();
     if (node?.type === "speak") {
       sayText = await speakFromNode(node, call.contact);
+      graphContext.lastSpokenText = sayText;
       const edge = sessionEngine.engine.getNextAutoEdge(node.id);
       if (edge) {
         sessionEngine.engine.currentNodeId = edge.target;
-        sessionEngine.engine.advanceThroughSpeakChain();
       }
     }
   } else {
@@ -348,16 +422,25 @@ export async function prepareInitialVoiceTurn(callId: string): Promise<VoiceTurn
     sayText = body;
   }
 
+  const persistData =
+    sessionEngine.mode === "staged"
+      ? persistStagedEngineState(sessionEngine.engine)
+      : sessionEngine.mode === "linear"
+        ? { currentStage: sessionEngine.engine.currentStageId }
+        : {
+            currentNodeId: sessionEngine.engine.currentNodeId,
+            currentStage: sessionEngine.engine.currentNodeId,
+            contextJson: serializeGraphContext(graphContext),
+          };
+
   await prisma.call.update({
     where: { id: callId },
-    data: {
-      currentNodeId: sessionEngine.mode === "graph" ? sessionEngine.engine.currentNodeId : undefined,
-      currentStage: sessionEngine.mode === "linear" ? sessionEngine.engine.currentStageId : sessionEngine.engine.currentNodeId,
-    },
+    data: persistData,
   });
 
   await addTranscript(callId, "ai", sayText);
   broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
+  scheduleStagedSilence(callId, scheduleSilenceSec);
 
   return { sayText, endCall: false };
 }
@@ -383,33 +466,59 @@ export async function processCustomerTurn(callId: string, text: string): Promise
     return { sayText: "סליחה, אירעה שגיאה.", endCall: true };
   }
 
-  const segment = await addTranscript(callId, "customer", text);
-  broadcastCallEvent({ type: "transcript", callId, speaker: "customer", text });
+  clearStagedSilence(callId);
 
-  const classification = await classifyUtterance(text, {
-    currentNodeId: call.currentNodeId ?? undefined,
-    awaitingRefusalConfirm:
-      call.currentNodeId === "listen_confirm" || call.currentNodeId === "route_confirm",
-  });
-  await persistClassification(segment.id, callId, classification);
-  broadcastCallEvent({
-    type: "classification",
-    callId,
-    segmentId: segment.id,
-    intentId: classification.intentId,
-    confidence: classification.confidence,
-  });
+  const isSilence = text.trim() === "";
+  const classification = isSilence
+    ? {
+        intentId: "silence",
+        confidence: 1,
+        entities: {},
+        classifier: "rule" as const,
+      }
+    : await classifyUtterance(text, {
+        currentNodeId: call.currentNodeId ?? undefined,
+        awaitingRefusalConfirm:
+          call.currentNodeId === "listen_confirm" || call.currentNodeId === "route_confirm",
+      });
+
+  if (!isSilence) {
+    const segment = await addTranscript(callId, "customer", text);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "customer", text });
+    await persistClassification(segment.id, callId, classification);
+    broadcastCallEvent({
+      type: "classification",
+      callId,
+      segmentId: segment.id,
+      intentId: classification.intentId,
+      confidence: classification.confidence,
+    });
+  }
 
   let session = activeSessions.get(callId);
   if (!session) {
     const sessionEngine = createSessionEngine(call.callFlow);
     if (call.currentNodeId && sessionEngine.mode === "graph") {
       sessionEngine.engine.currentNodeId = call.currentNodeId;
+    } else if (sessionEngine.mode === "staged") {
+      const staged = parseStagedFlow(call.callFlow.stagesJson);
+      if (staged) {
+        sessionEngine.engine = restoreStagedEngine(
+          staged,
+          call.currentStage,
+          call.currentSubflowId,
+          call.contextJson,
+        );
+      }
     } else if (call.currentStage && sessionEngine.mode === "linear") {
       sessionEngine.engine.currentStageId = call.currentStage;
     }
     session = { session: sessionEngine };
     activeSessions.set(callId, session);
+  }
+
+  if (session.session.mode === "staged") {
+    return processStagedTurn(callId, call as CallWithRelations, session.session.engine, text, classification);
   }
 
   if (session.session.mode === "graph") {
@@ -421,9 +530,51 @@ export async function processCustomerTurn(callId: string, text: string): Promise
 
 type CallWithRelations = {
   id: string;
+  contactId: string;
+  contextJson: string;
   contact: Contact;
   callFlow: CallFlow;
 };
+
+async function processStagedTurn(
+  callId: string,
+  call: CallWithRelations,
+  engine: StagedFlowEngine,
+  text: string,
+  classification: Awaited<ReturnType<typeof classifyUtterance>>,
+): Promise<VoiceTurnResult> {
+  const result = await processStagedUtterance(engine, call.contact, text, classification);
+
+  await prisma.call.update({
+    where: { id: callId },
+    data: persistStagedEngineState(engine),
+  });
+
+  if (result.contactStatus === "blacklisted") {
+    await prisma.contact.update({
+      where: { id: call.contactId },
+      data: { status: "blacklisted" },
+    });
+  } else if (result.contactStatus === "callback") {
+    await transitionContactStatus(call.contactId, "callback");
+  }
+
+  await addTranscript(callId, "ai", result.sayText);
+  broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: result.sayText });
+
+  if (result.endCall) {
+    const outcome = result.outcome ?? "none";
+    if (outcome !== "none") {
+      await finalizeCall(callId, outcome);
+    } else {
+      await updateCallStatus(callId, "ended", "none");
+    }
+    return { sayText: result.sayText, endCall: true };
+  }
+
+  scheduleStagedSilence(callId, result.scheduleSilenceSec);
+  return { sayText: result.sayText, endCall: false };
+}
 
 async function processGraphTurn(
   callId: string,
@@ -433,15 +584,83 @@ async function processGraphTurn(
   classification: Awaited<ReturnType<typeof classifyUtterance>>,
 ): Promise<VoiceTurnResult> {
   const thresholds = await getIntentThresholds();
-  let node = engine.getCurrentNode();
+  const ctx = parseGraphContext(call.contextJson);
 
-  if (node?.type === "listen" || node?.type === "intent_route" || node?.type === "decision") {
-    node = engine.advanceByClassification(classification, thresholds) ?? undefined;
+  if (classification.intentId === "opt_out_remove") {
+    const sayText = OPT_OUT_GOODBYE;
+    await prisma.contact.update({
+      where: { id: call.contactId },
+      data: { status: "blacklisted" },
+    });
+    await addTranscript(callId, "ai", sayText);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
+    await finalizeCall(callId, "refused");
+    return { sayText, endCall: true };
   }
 
-  let sayText = "אשמח להמשיך לעזור לך.";
-  let spokeThisTurn = false;
-  while (node?.type === "speak") {
+  if (classification.intentId === "didnt_understand") {
+    const sayText = ctx.lastSpokenText || "אשמח לחזור על השאלה.";
+    await prisma.call.update({
+      where: { id: callId },
+      data: {
+        currentNodeId: engine.currentNodeId,
+        currentStage: engine.currentNodeId,
+        contextJson: serializeGraphContext(ctx),
+      },
+    });
+    await addTranscript(callId, "ai", sayText);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
+    return { sayText, endCall: false };
+  }
+
+  if (isProductQaIntent(classification.intentId)) {
+    const listenId = getListenCheckpoint(engine);
+    const speakNode = listenId ? speakNodeForListen(engine, listenId) : undefined;
+    const stagePrompt =
+      speakNode?.text.replace(/\{\{(\w+)\}\}/g, (_m, key) => {
+        const vars = templateVars(call.contact.firstName, call.contact.familyName);
+        return vars[key as keyof typeof vars] ?? "";
+      }) ?? "";
+    const productCtx = await buildProductContext(classification.intentId, classification.entities);
+    const reply = await generateSalesReply(text, {
+      customerFirstName: call.contact.firstName,
+      stagePrompt,
+      ...productCtx,
+    });
+    await prisma.call.update({
+      where: { id: callId },
+      data: {
+        currentNodeId: engine.currentNodeId,
+        currentStage: engine.currentNodeId,
+        contextJson: serializeGraphContext(ctx),
+      },
+    });
+    await addTranscript(callId, "ai", reply.text);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: reply.text });
+    return { sayText: reply.text, endCall: false };
+  }
+
+  let routedClassification = classification;
+  if (classification.intentId === "provide_address") {
+    const address =
+      (classification.entities as { address?: string }).address ?? text.trim();
+    const available = await lookupFiberAvailability(address);
+    routedClassification = {
+      ...classification,
+      intentId: available ? "fiber_available" : "fiber_unavailable",
+      confidence: 1,
+    };
+  }
+
+  engine.advanceFromListen();
+  let node = engine.getCurrentNode();
+  if (node?.type === "intent_route" || node?.type === "decision") {
+    node = engine.advanceByClassification(routedClassification, thresholds) ?? undefined;
+  }
+
+  let sayText = ctx.lastSpokenText || "אשמח להמשיך לעזור לך.";
+
+  if (node?.type === "speak") {
     sayText = await speakFromNode(
       node,
       call.contact,
@@ -449,55 +668,64 @@ async function processGraphTurn(
       classification.entities,
       classification.intentId,
     );
-    spokeThisTurn = true;
+    ctx.lastSpokenText = sayText;
     const edge = engine.getNextAutoEdge(node.id);
-    if (!edge) break;
-    engine.currentNodeId = edge.target;
-    node = engine.getCurrentNode();
+    if (edge) {
+      engine.currentNodeId = edge.target;
+      node = engine.getCurrentNode();
+    }
+  }
+
+  if (node?.type === "speak" && node.id.startsWith("goodbye_")) {
+    sayText = await speakFromNode(node, call.contact);
+    ctx.lastSpokenText = sayText;
+    const edge = engine.getNextAutoEdge(node.id);
+    if (edge) {
+      engine.currentNodeId = edge.target;
+      node = engine.getCurrentNode();
+    }
   }
 
   if (engine.isEndNode(node)) {
-    const outcome = node.outcome ?? detectOutcome(text) ?? "none";
+    const outcome = node.outcome ?? "none";
+    if (node.id === "end_blacklist") {
+      await prisma.contact.update({
+        where: { id: call.contactId },
+        data: { status: "blacklisted" },
+      });
+    } else if (node.id === "end_callback" || outcome === "callback") {
+      await transitionContactStatus(call.contactId, "callback");
+    }
+
+    await prisma.call.update({
+      where: { id: callId },
+      data: {
+        currentNodeId: engine.currentNodeId,
+        currentStage: engine.currentNodeId,
+        contextJson: serializeGraphContext(ctx),
+      },
+    });
+    await addTranscript(callId, "ai", sayText);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
+
     const endOutcome =
-      outcome === "sold" || outcome === "refused" || outcome === "callback"
-        ? outcome
-        : (detectOutcome(text) ?? "none");
-    const finalText = spokeThisTurn
-      ? sayText
-      : endOutcome === "refused"
-        ? "תודה על זמנך. יום נעים!"
-        : endOutcome === "callback"
-          ? "נחזור אליך בזמן שנוח לך."
-          : endOutcome === "sold"
-            ? SOLD_GOODBYE
-            : "תודה רבה על השיחה.";
-    await addTranscript(callId, "ai", finalText);
-    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: finalText });
+      outcome === "sold" || outcome === "refused" || outcome === "callback" ? outcome : "none";
     if (endOutcome !== "none") {
       await finalizeCall(callId, endOutcome);
-      return { sayText: finalText, endCall: true };
+    } else {
+      await updateCallStatus(callId, "ended", "none");
     }
+    return { sayText, endCall: true };
   }
 
   await prisma.call.update({
     where: { id: callId },
-    data: { currentNodeId: engine.currentNodeId, currentStage: engine.currentNodeId },
+    data: {
+      currentNodeId: engine.currentNodeId,
+      currentStage: engine.currentNodeId,
+      contextJson: serializeGraphContext(ctx),
+    },
   });
-
-  const purchaseThreshold = thresholds.agree_purchase ?? 0.7;
-  const outcome =
-    classification.intentId === "agree_purchase" && classification.confidence >= purchaseThreshold
-      ? "sold"
-      : classification.intentId === "callback"
-        ? "callback"
-        : detectOutcome(text);
-  if (outcome === "sold" || outcome === "callback") {
-    const closingText = outcome === "sold" ? SOLD_GOODBYE : sayText;
-    await addTranscript(callId, "ai", closingText);
-    broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: closingText });
-    await finalizeCall(callId, outcome);
-    return { sayText: closingText, endCall: true };
-  }
 
   await addTranscript(callId, "ai", sayText);
   broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
@@ -542,6 +770,7 @@ export async function handleCustomerSpeech(callId: string, text: string) {
   const session = activeSessions.get(callId);
   session?.tts?.abort();
   clearPlayback(callId);
+  clearStagedSilence(callId);
 
   const turn = await processCustomerTurn(callId, text);
 

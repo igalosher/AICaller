@@ -15,6 +15,7 @@ const createSchema = z.object({
   firstName: z.string().min(1),
   familyName: z.string().optional(),
   phone: z.string().min(9),
+  sex: z.enum(["male", "female"]).optional(),
   notes: z.string().optional(),
 });
 
@@ -22,8 +23,9 @@ const updateSchema = z.object({
   firstName: z.string().min(1).optional(),
   familyName: z.string().optional(),
   phone: z.string().min(9).optional(),
+  sex: z.enum(["male", "female"]).optional(),
   notes: z.string().optional(),
-  status: z.enum(["pending", "in_call", "sold", "callback", "refused"]).optional(),
+  status: z.enum(["pending", "in_call", "sold", "callback", "refused", "blacklisted"]).optional(),
 });
 
 router.post("/", validate(createSchema), async (req, res, next) => {

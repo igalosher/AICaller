@@ -13,6 +13,12 @@ enum ContactStatus {
   sold
   callback
   refused
+  blacklisted
+}
+
+enum ContactSex {
+  male
+  female
 }
 
 enum CallStatus {
@@ -38,6 +44,7 @@ model Contact {
   firstName  String
   familyName String        @default("")
   phone      String        @unique
+  sex        ContactSex    @default(male)
   status    ContactStatus @default(pending)
   notes     String?
   deletedAt DateTime?
@@ -55,8 +62,10 @@ model Call {
   status         CallStatus            @default(dialing)
   outcome        CallOutcome           @default(none)
   externalCallId String?
-  currentStage   String?
-  currentNodeId  String?
+  currentStage      String?
+  currentSubflowId  String?
+  currentNodeId     String?
+  contextJson       String                @default("{}")
   summary        String?
   startedAt      DateTime              @default(now())
   endedAt        DateTime?

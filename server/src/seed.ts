@@ -1,10 +1,9 @@
 import { prisma } from "./db.js";
 import { refreshProductKnowledge } from "./services/productKnowledge.js";
-import { createCallFlowVersion } from "./services/callFlowService.js";
 import { ensureYesCatalogSeeded } from "./services/yesCatalogService.js";
 import { seedDefaultIntents } from "./services/intentService.js";
-import { ensureStarterGraphPublished, migrateToSigalFlowIfNeeded } from "./services/flowGraphService.js";
-import { createDefaultStarterFlow, SIGAL_OPENING } from "./flow/starterFlow.js";
+import { migrateToSigalMiniFlowIfNeeded } from "./services/flowGraphService.js";
+import { createSigalMiniFlowGraph, STAGED_OPENING } from "./flow/sigalMiniFlow.js";
 
 export async function runSeed() {
   await seedDefaultIntents();
@@ -23,30 +22,21 @@ export async function runSeed() {
   await ensureYesCatalogSeeded();
   const flowCount = await prisma.callFlow.count();
   if (flowCount === 0) {
-    const starterGraph = createDefaultStarterFlow();
+    const graph = createSigalMiniFlowGraph();
     await prisma.callFlow.create({
       data: {
         version: 1,
-        openingTemplate: SIGAL_OPENING.replace(/\{\{agent_name\}\}/g, "סיגל"),
-        stagesJson: JSON.stringify([
-          { id: "greeting", prompt: "האם זה זמן נוח?", next: "pitch" },
-          { id: "pitch", prompt: "חבילת טריפל מ-149 שקלים.", next: "closing" },
-          { id: "closing", prompt: "לסגור היום?", next: "closing" },
-        ]),
-        objectionsJson: JSON.stringify({
-          price_objection: "יש חבילות מ-99 שקלים.",
-          not_interested: "תודה על זמנך.",
-          callback: "מתי לחזור?",
-        }),
-        draftGraphJson: JSON.stringify(starterGraph),
-        publishedGraphJson: JSON.stringify(starterGraph),
+        openingTemplate: STAGED_OPENING,
+        stagesJson: "[]",
+        objectionsJson: "{}",
+        draftGraphJson: JSON.stringify(graph),
+        publishedGraphJson: JSON.stringify(graph),
         graphPublishedAt: new Date(),
         isActive: true,
       },
     });
   } else {
-    await ensureStarterGraphPublished();
-    await migrateToSigalFlowIfNeeded();
+    await migrateToSigalMiniFlowIfNeeded();
   }
 
   await refreshProductKnowledge();

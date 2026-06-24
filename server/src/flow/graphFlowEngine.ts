@@ -72,6 +72,15 @@ export class GraphFlowEngine {
     return node;
   }
 
+  advanceFromListen(): FlowNode | null {
+    const node = this.getCurrentNode();
+    if (node?.type !== "listen") return node ?? null;
+    const edge = this.getNextAutoEdge();
+    if (!edge) return node;
+    this.currentNodeId = edge.target;
+    return this.getCurrentNode() ?? null;
+  }
+
   advanceThroughSpeakChain(): FlowNode | null {
     let node = this.getCurrentNode();
     let guard = 0;

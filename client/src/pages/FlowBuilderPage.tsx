@@ -14,6 +14,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
 import { callFlowsApi } from "../api";
 import type { FlowEdge, FlowGraph, FlowNode } from "../types";
@@ -40,6 +41,24 @@ function FlowNodeCard({ data }: { data: { label: string; nodeType: string; text?
 
 const nodeTypes = { flowNode: FlowNodeCard };
 
+function getErrorMessage(err: unknown, fallback: string): string {
+  if (isAxiosError(err) && err.response?.data?.error) {
+    return String(err.response.data.error);
+  }
+  if (err instanceof Error && err.message) return err.message;
+  return fallback;
+}
+
+function formatSavedAt(date: Date): string {
+  return date.toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+type FlowEdgeData = {
+  intentId?: string;
+  isDefault?: boolean;
+  edgeLabel?: string;
+};
+
 function graphToReactFlow(graph: FlowGraph): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = graph.nodes.map((n) => ({
     id: n.id,
@@ -52,6 +71,11 @@ function graphToReactFlow(graph: FlowGraph): { nodes: Node[]; edges: Edge[] } {
     source: e.source,
     target: e.target,
     label: e.label ?? e.intentId ?? (e.isDefault ? "ברירת מחדל" : ""),
+    data: {
+      intentId: e.intentId,
+      isDefault: e.isDefault,
+      edgeLabel: e.label,
+    } satisfies FlowEdgeData,
   }));
   return { nodes, edges };
 }
@@ -73,14 +97,28 @@ function reactFlowToGraph(
     };
     return { ...base, position: n.position, label: String(n.data.label ?? base.label) };
   });
-  const flowEdges: FlowEdge[] = edges.map((e) => ({
-    id: e.id,
-    source: e.source,
-    target: e.target,
-    label: typeof e.label === "string" ? e.label : undefined,
-    intentId: typeof e.label === "string" && e.label.startsWith("intent:") ? e.label.slice(7) : undefined,
-    isDefault: e.label === "ברירת מחדל",
-  }));
+  const flowEdges: FlowEdge[] = edges.map((e) => {
+    const meta = (e.data ?? {}) as FlowEdgeData;
+    const label =
+      meta.edgeLabel ??
+      (typeof e.label === "string" && e.label !== "ברירת מחדל" ? e.label : undefined);
+    const intentId =
+      meta.intentId ??
+      (typeof e.label === "string" && e.label.startsWith("intent:")
+        ? e.label.slice(7)
+        : typeof e.label === "string" && e.label && e.label !== "ברירת מחדל"
+          ? e.label
+          : undefined);
+    const isDefault = meta.isDefault ?? e.label === "ברירת מחדל";
+    return {
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      label,
+      intentId: isDefault ? undefined : intentId,
+      isDefault: isDefault || undefined,
+    };
+  });
   return { startNodeId, nodes: flowNodes, edges: flowEdges };
 }
 
@@ -92,10 +130,12 @@ export function FlowBuilderPage() {
     queryFn: () => callFlowsApi.getGraph(flow!.id),
     enabled: !!flow?.id,
   });
-
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [validationErrors, setValidationErrors] = useState<{ messageHe: string }[]>([]);
   const [preview, setPreview] = useState("");
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
   const initial = useMemo(() => (graph ? graphToReactFlow(graph) : { nodes: [], edges: [] }), [graph]);
   const [nodes, setNodes, onNodesChange] = useNodesState(initial.nodes);
@@ -118,32 +158,98 @@ export function FlowBuilderPage() {
 
   const selectedNode = rawNodes.find((n) => n.id === selectedId);
 
+  const saveGraphDraft = useCallback(async () => {
+    if (!flow) throw new Error("אין זרימה פעילה לשמירה");
+    const startNodeId = graph?.startNodeId ?? nodes[0]?.id;
+    if (!startNodeId) throw new Error("הגרף ריק — אין צומת התחלה");
+    const g = reactFlowToGraph(nodes, edges, startNodeId, rawNodes);
+    return callFlowsApi.saveGraph(flow.id, g);
+  }, [flow, nodes, edges, graph?.startNodeId, rawNodes]);
+
+  const applySavedGraph = useCallback(
+    (g: FlowGraph, message: string) => {
+      qc.setQueryData(["flowGraph", flow?.id], g);
+      const rf = graphToReactFlow(g);
+      setNodes(rf.nodes);
+      setEdges(rf.edges);
+      setRawNodes(g.nodes);
+      setValidationErrors([]);
+      setActionError(null);
+      setStatusBanner(message);
+      setSuccessMessage(message);
+    },
+    [flow?.id, qc, setEdges, setNodes],
+  );
+
   const saveMutation = useMutation({
-    mutationFn: async () => {
-      if (!flow) throw new Error("no flow");
-      const g = reactFlowToGraph(nodes, edges, graph?.startNodeId ?? flow.id, rawNodes);
-      return callFlowsApi.saveGraph(flow.id, g);
+    mutationFn: saveGraphDraft,
+    onMutate: () => setActionError(null),
+    onSuccess: (g) => {
+      const message = `הטיוטה נשמרה בהצלחה (${g.nodes.length} צמתים, ${g.edges.length} קשתות) — ${formatSavedAt(new Date())}`;
+      applySavedGraph(g, message);
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["flowGraph"] });
-    },
+    onError: (err) => setActionError(getErrorMessage(err, "שגיאה בשמירת הטיוטה")),
   });
 
   const publishMutation = useMutation({
     mutationFn: async () => {
-      if (!flow) throw new Error("no flow");
-      await saveMutation.mutateAsync();
-      return callFlowsApi.publish(flow.id);
+      if (!flow) throw new Error("אין זרימה פעילה לפרסום");
+      const g = await saveGraphDraft();
+      const published = await callFlowsApi.publish(flow.id);
+      return { graph: g, flow: published };
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["callFlow"] });
-      qc.invalidateQueries({ queryKey: ["flowGraph"] });
+    onMutate: () => setActionError(null),
+    onSuccess: ({ graph: g, flow: published }) => {
+      qc.setQueryData(["callFlow"], published);
+      const message = `הזרימה פורסמה בהצלחה (גרסה ${published.version}) — ${formatSavedAt(new Date())}`;
+      qc.setQueryData(["flowGraph", published.id], g);
+      applySavedGraph(g, message);
+    },
+    onError: (err) => {
+      const message = getErrorMessage(err, "שגיאה בפרסום הזרימה");
+      setActionError(message);
+      if (message.includes(";")) {
+        setValidationErrors(message.split(";").map((messageHe) => ({ messageHe: messageHe.trim() })));
+      }
     },
   });
 
+  const reloadMutation = useMutation({
+    mutationFn: () => callFlowsApi.getGraph(flow!.id),
+    onSuccess: (g) => {
+      qc.setQueryData(["flowGraph", flow?.id], g);
+      const rf = graphToReactFlow(g);
+      setNodes(rf.nodes);
+      setEdges(rf.edges);
+      setRawNodes(g.nodes);
+      setSelectedId(g.startNodeId);
+      setValidationErrors([]);
+      setPreview("");
+      setSuccessMessage("הזרימה נטענה מחדש מהשרת");
+    },
+  });
+
+  const handleReload = () => {
+    if (!flow?.id) return;
+    if (!window.confirm("לבטל שינויים שלא נשמרו ולטעון את הגרסה האחרונה מהשרת?")) return;
+    reloadMutation.mutate();
+  };
+
   const validateMutation = useMutation({
-    mutationFn: () => callFlowsApi.validate(flow!.id),
-    onSuccess: (data) => setValidationErrors(data.errors),
+    mutationFn: async () => {
+      await saveGraphDraft();
+      return callFlowsApi.validate(flow!.id);
+    },
+    onSuccess: (data) => {
+      setValidationErrors(data.errors);
+      if (data.errors.length === 0) {
+        setStatusBanner("הזרימה תקינה — מוכנה לפרסום");
+        setActionError(null);
+      } else {
+        setActionError(`נמצאו ${data.errors.length} שגיאות אימות — ראה רשימה למטה`);
+      }
+    },
+    onError: (err) => setActionError(getErrorMessage(err, "שגיאה באימות הזרימה")),
   });
 
   const importMutation = useMutation({
@@ -210,14 +316,71 @@ export function FlowBuilderPage() {
           <button className="rounded border px-3 py-1 text-sm" onClick={() => validateMutation.mutate()}>
             אימות
           </button>
-          <button className="rounded bg-slate-700 px-3 py-1 text-sm text-white" onClick={() => saveMutation.mutate()}>
-            שמור טיוטה
+          <button
+            type="button"
+            className="rounded border border-amber-300 bg-amber-50 px-3 py-1 text-sm text-amber-900 disabled:opacity-50"
+            onClick={handleReload}
+            disabled={reloadMutation.isPending || !flow?.id}
+          >
+            {reloadMutation.isPending ? "טוען..." : "טען מחדש"}
           </button>
-          <button className="rounded bg-blue-600 px-3 py-1 text-sm text-white" onClick={() => publishMutation.mutate()}>
-            פרסם זרימה
+          <button
+            type="button"
+            className="rounded bg-slate-700 px-3 py-1 text-sm text-white disabled:opacity-50"
+            onClick={() => saveMutation.mutate()}
+            disabled={!flow?.id || saveMutation.isPending || publishMutation.isPending || reloadMutation.isPending}
+          >
+            {saveMutation.isPending ? "שומר..." : "שמור טיוטה"}
+          </button>
+          <button
+            type="button"
+            className="rounded bg-blue-600 px-3 py-1 text-sm text-white disabled:opacity-50"
+            onClick={() => publishMutation.mutate()}
+            disabled={!flow?.id || saveMutation.isPending || publishMutation.isPending || reloadMutation.isPending}
+          >
+            {publishMutation.isPending ? "מפרסם..." : "פרסם זרימה"}
           </button>
         </div>
       </div>
+
+      {statusBanner && (
+        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900">
+          {statusBanner}
+        </div>
+      )}
+
+      {successMessage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-full max-w-sm rounded-xl bg-white p-6 text-center shadow-lg">
+            <p className="mb-4 text-lg font-medium text-green-800">{successMessage}</p>
+            <button
+              type="button"
+              className="rounded bg-blue-600 px-4 py-2 text-sm text-white"
+              onClick={() => {
+                setSuccessMessage(null);
+                setStatusBanner((prev) => prev ?? successMessage);
+              }}
+            >
+              אישור
+            </button>
+          </div>
+        </div>
+      )}
+
+      {actionError && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-full max-w-md rounded-xl bg-white p-6 text-center shadow-lg">
+            <p className="mb-4 text-lg font-medium text-red-800">{actionError}</p>
+            <button
+              type="button"
+              className="rounded bg-blue-600 px-4 py-2 text-sm text-white"
+              onClick={() => setActionError(null)}
+            >
+              אישור
+            </button>
+          </div>
+        </div>
+      )}
 
       {validationErrors.length > 0 && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">

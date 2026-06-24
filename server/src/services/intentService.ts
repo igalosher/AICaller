@@ -106,6 +106,156 @@ const DEFAULT_INTENTS = [
     examples: ["כן לא מעוניין", "בטוח", "בטח", "כן אני בטוח", "באמת לא"],
   },
   {
+    id: "opt_out_remove",
+    labelHe: "הסרה מרשימה",
+    category: "compliance",
+    examples: ["הסר", "תסירו אותי", "הסירו אותי", "remove me"],
+  },
+  {
+    id: "ask_offer",
+    labelHe: "שאלה על ההצעה",
+    category: "opening",
+    examples: ["מה ההצעה", "תספרי על ההצעה", "מה יש לכם", "מה המבצע"],
+  },
+  {
+    id: "didnt_understand",
+    labelHe: "לא הבנתי",
+    category: "tone",
+    examples: ["לא הבנתי", "מה", "מה?", "תחזרי על זה", "שוב"],
+  },
+  {
+    id: "provide_tv_count",
+    labelHe: "מספר טלוויזיות",
+    category: "qualification",
+    examples: ["אחת", "שתיים", "2", "שלוש טלוויזיות", "4"],
+  },
+  {
+    id: "internet_regular",
+    labelHe: "אינטרנט רגיל",
+    category: "qualification",
+    examples: ["רגיל", "אינטרנט רגיל", "לא סיבים"],
+  },
+  {
+    id: "internet_fiber",
+    labelHe: "סיבים",
+    category: "qualification",
+    examples: ["סיבים", "סיבים אופטיים", "פייבר"],
+  },
+  {
+    id: "internet_unknown",
+    labelHe: "לא יודע תשתית",
+    category: "qualification",
+    examples: ["לא יודע", "לא בטוח", "אין מושג"],
+  },
+  {
+    id: "no_internet",
+    labelHe: "אין אינטרנט",
+    category: "qualification",
+    examples: ["אין לי אינטרנט", "בלי אינטרנט", "אין אינטרנט בבית"],
+  },
+  {
+    id: "provide_address",
+    labelHe: "כתובת",
+    category: "qualification",
+    examples: ["תל אביב הרצל 1", "רחוב הרצל 5 תל אביב"],
+  },
+  {
+    id: "select_speed_100",
+    labelHe: "100 מגה",
+    category: "qualification",
+    examples: ["מאה מגה", "100", "מאה"],
+  },
+  {
+    id: "select_speed_200",
+    labelHe: "200 מגה",
+    category: "qualification",
+    examples: ["מאתיים מגה", "200", "מאתיים"],
+  },
+  {
+    id: "select_speed_300",
+    labelHe: "300 מגה",
+    category: "qualification",
+    examples: ["שלוש מאות", "300", "שלוש מאות מגה"],
+  },
+  {
+    id: "select_speed_600",
+    labelHe: "600 מגה",
+    category: "qualification",
+    examples: ["שש מאות", "600", "שש מאות מגה"],
+  },
+  {
+    id: "select_speed_1000",
+    labelHe: "גיגה",
+    category: "qualification",
+    examples: ["גיגה", "אלף מגה", "1000"],
+  },
+  {
+    id: "provider_bezeq",
+    labelHe: "ספק בזק",
+    category: "qualification",
+    examples: ["בזק"],
+  },
+  {
+    id: "provider_hot",
+    labelHe: "ספק הוט",
+    category: "qualification",
+    examples: ["הוט", "hot"],
+  },
+  {
+    id: "provider_partner",
+    labelHe: "ספק פרטנר",
+    category: "qualification",
+    examples: ["פרטנר", "partner"],
+  },
+  {
+    id: "provider_cellcom",
+    labelHe: "ספק סלקום",
+    category: "qualification",
+    examples: ["סלקום", "cellcom"],
+  },
+  {
+    id: "provider_other",
+    labelHe: "ספק אחר",
+    category: "qualification",
+    examples: ["אחר", "ספק אחר"],
+  },
+  {
+    id: "provide_current_price",
+    labelHe: "מחיר נוכחי",
+    category: "qualification",
+    examples: ["משלם 150", "מאה וחמישים שקל"],
+  },
+  {
+    id: "select_addons",
+    labelHe: "בחירת תוספות",
+    category: "closing",
+    examples: ["כן תוסיפי ספורט", "רוצה VOD", "תוסיפי"],
+  },
+  {
+    id: "decline_addons",
+    labelHe: "ללא תוספות",
+    category: "closing",
+    examples: ["לא תודה", "בלי תוספות", "לא צריך"],
+  },
+  {
+    id: "agree_callback",
+    labelHe: "מסכים לשיחה חוזרת",
+    category: "closing",
+    examples: ["כן תחזרו", "בטח", "כן נציג", "מעוניין"],
+  },
+  {
+    id: "decline_callback",
+    labelHe: "לא לשיחה חוזרת",
+    category: "closing",
+    examples: ["לא תודה", "לא צריך", "לא מעוניין"],
+  },
+  {
+    id: "silence",
+    labelHe: "שתיקה",
+    category: "system",
+    examples: [],
+  },
+  {
     id: "unknown",
     labelHe: "לא ידוע",
     category: "system",
@@ -282,6 +432,119 @@ function matchesSmallTalk(norm: string): boolean {
   );
 }
 
+function extractTvCount(norm: string): number | null {
+  const digit = norm.match(/\d+/);
+  if (digit) return Math.min(10, parseInt(digit[0]!, 10));
+  const words: Record<string, number> = {
+    אחת: 1,
+    אחד: 1,
+    שתיים: 2,
+    שניים: 2,
+    שלוש: 3,
+    ארבע: 4,
+    חמש: 5,
+    שש: 6,
+  };
+  for (const [w, n] of Object.entries(words)) {
+    if (norm.includes(w)) return n;
+  }
+  return null;
+}
+
+function extractPrice(norm: string): number | null {
+  const digit = norm.match(/(\d{2,4})/);
+  if (digit) return parseInt(digit[1]!, 10);
+  return null;
+}
+
+function ruleStagedQualification(utterance: string): ClassificationResult | null {
+  const norm = normalize(utterance);
+  if (norm === "הסר" || norm.includes("תסירו אותי") || norm.includes("הסירו אותי")) {
+    return { intentId: "opt_out_remove", confidence: 0.98, entities: {}, classifier: "rule" };
+  }
+  if (
+    norm === "מה" ||
+    norm === "מה?" ||
+    norm.includes("לא הבנתי") ||
+    norm.includes("תחזרי על") ||
+    norm === "שוב"
+  ) {
+    return { intentId: "didnt_understand", confidence: 0.95, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("מה ההצעה") || norm.includes("תספרי על ההצעה")) {
+    return { intentId: "ask_offer", confidence: 0.92, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("אין לי אינטרנט") || norm.includes("בלי אינטרנט")) {
+    return { intentId: "no_internet", confidence: 0.9, entities: {}, classifier: "rule" };
+  }
+  if (norm === "רגיל" || norm.includes("אינטרנט רגיל")) {
+    return { intentId: "internet_regular", confidence: 0.9, entities: {}, classifier: "rule" };
+  }
+  if (norm === "סיבים" || norm.includes("סיבים אופטיים") || norm.includes("פייבר")) {
+    return { intentId: "internet_fiber", confidence: 0.9, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("לא יודע") || norm.includes("לא בטוח")) {
+    return { intentId: "internet_unknown", confidence: 0.88, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("בזק")) {
+    return { intentId: "provider_bezeq", confidence: 0.9, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("הוט") || norm.includes("hot")) {
+    return { intentId: "provider_hot", confidence: 0.9, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("פרטנר") || norm.includes("partner")) {
+    return { intentId: "provider_partner", confidence: 0.9, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("סלקום") || norm.includes("cellcom")) {
+    return { intentId: "provider_cellcom", confidence: 0.9, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("גיגה") || norm.includes("אלף מגה")) {
+    return { intentId: "select_speed_1000", confidence: 0.88, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("שש מאות") || norm === "600") {
+    return { intentId: "select_speed_600", confidence: 0.88, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("שלוש מאות") || norm === "300") {
+    return { intentId: "select_speed_300", confidence: 0.88, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("מאתיים") || norm === "200") {
+    return { intentId: "select_speed_200", confidence: 0.88, entities: {}, classifier: "rule" };
+  }
+  if (norm.includes("מאה מגה") || (norm.includes("מאה") && !norm.includes("מאתיים"))) {
+    return { intentId: "select_speed_100", confidence: 0.85, entities: {}, classifier: "rule" };
+  }
+  const tv = extractTvCount(norm);
+  if (tv != null && (norm.includes("טלוויז") || norm.includes("מסך") || /^\d+$/.test(norm) || tv <= 6)) {
+    return {
+      intentId: "provide_tv_count",
+      confidence: 0.88,
+      entities: { tv_count: tv },
+      classifier: "rule",
+    };
+  }
+  const price = extractPrice(norm);
+  if (price != null && (norm.includes("משלם") || norm.includes("שקל") || norm.includes("₪"))) {
+    return {
+      intentId: "provide_current_price",
+      confidence: 0.85,
+      entities: { monthly_price: price },
+      classifier: "rule",
+    };
+  }
+  if (norm.length >= 8 && (norm.includes("רחוב") || norm.includes("תל אביב") || /\d/.test(norm))) {
+    return {
+      intentId: "provide_address",
+      confidence: 0.8,
+      entities: { address: utterance.trim() },
+      classifier: "rule",
+    };
+  }
+  if (norm.includes("תחזרו") && (norm.includes("כן") || norm.includes("בטח") || norm.includes("נציג"))) {
+    return { intentId: "agree_callback", confidence: 0.88, entities: {}, classifier: "rule" };
+  }
+  return null;
+}
+
 function ruleToneAndProduct(utterance: string): ClassificationResult | null {
   const norm = normalize(utterance);
   if (matchesInsult(norm)) {
@@ -293,7 +556,7 @@ function ruleToneAndProduct(utterance: string): ClassificationResult | null {
   if (norm.includes("נתב") && (norm.includes("כמה") || norm.includes("שכירות") || norm.includes("מחיר"))) {
     return { intentId: "ask_router_rental", confidence: 0.88, entities: {}, classifier: "rule" };
   }
-  if (norm.includes("אינטרנט") || norm.includes("מהירות") || norm.includes("סיבים") || norm.includes("מגה")) {
+  if (norm.includes("אינטרנט") || norm.includes("מהירות") || norm.includes("מגה")) {
     return { intentId: "ask_internet", confidence: 0.85, entities: {}, classifier: "rule" };
   }
   if (
@@ -382,6 +645,9 @@ export async function classifyUtterance(
 
   const confirmResult = classifyRefusalConfirm(utterance, awaiting);
   if (confirmResult) return confirmResult;
+
+  const stagedEarly = ruleStagedQualification(utterance);
+  if (stagedEarly) return stagedEarly;
 
   const toneEarly = ruleToneAndProduct(utterance);
   if (toneEarly) return toneEarly;

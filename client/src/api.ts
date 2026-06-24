@@ -7,7 +7,13 @@ export const contactsApi = {
   list: (params?: { search?: string; status?: string }) =>
     api.get<{ items: Contact[]; total: number }>("/contacts", { params }).then((r) => r.data),
   get: (id: string) => api.get<Contact & { calls: Call[] }>(`/contacts/${id}`).then((r) => r.data),
-  create: (data: { firstName: string; familyName?: string; phone: string; notes?: string }) =>
+  create: (data: {
+    firstName: string;
+    familyName?: string;
+    phone: string;
+    sex?: import("./types").ContactSex;
+    notes?: string;
+  }) =>
     api.post<Contact>("/contacts", data).then((r) => r.data),
   update: (id: string, data: Partial<Contact>) =>
     api.put<Contact>(`/contacts/${id}`, data).then((r) => r.data),
