@@ -1,5 +1,6 @@
 import twilio from "twilio";
 import { createPlayClip } from "./playAudio.js";
+import type { TtsOptions } from "./tts.js";
 import { getTelephonyConfig } from "../services/settingsService.js";
 import { prisma } from "../db.js";
 import { logger } from "../logger.js";
@@ -79,8 +80,9 @@ export async function buildTwimlForSpeech(
   callId: string,
   text: string,
   endCall: boolean,
+  ttsOptions?: TtsOptions,
 ): Promise<string | null> {
-  const clipId = await createPlayClip(text);
+  const clipId = await createPlayClip(text, ttsOptions);
   if (!clipId) return null;
   const base = await resolveWebhookBaseUrl();
   const playUrl = `${base}/api/webhooks/twilio/audio/${clipId}`;
@@ -92,10 +94,15 @@ export async function playOnTwilioCall(
   text: string,
   endCall: boolean,
 ): Promise<boolean> {
-  const call = await prisma.call.findUnique({ where: { id: callId } });
+  const call = await prisma.call.findUnique({
+    where: { id: callId },
+    include: { contact: true },
+  });
   if (!call?.externalCallId || call.externalCallId.startsWith("mock-")) return false;
 
-  const twiml = await buildTwimlForSpeech(callId, text, endCall);
+  const twiml = await buildTwimlForSpeech(callId, text, endCall, {
+    addresseeSex: call.contact?.sex,
+  });
   if (!twiml) {
     logger.warn({ callId }, "No ElevenLabs audio — Twilio play skipped");
     return false;

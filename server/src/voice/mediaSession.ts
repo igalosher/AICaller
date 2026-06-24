@@ -2,7 +2,7 @@ import type WebSocket from "ws";
 import { getAiConfig } from "../services/settingsService.js";
 import { logger } from "../logger.js";
 import { DeepgramSttSession } from "./deepgramStt.js";
-import { synthesizeHebrewSpeech } from "./tts.js";
+import { synthesizeHebrewSpeech, type TtsOptions } from "./tts.js";
 import type { TtsSession } from "./tts.js";
 
 const MULAW_CHUNK_BYTES = 160; // 20 ms @ 8 kHz μ-law
@@ -203,11 +203,12 @@ export async function speakOnCall(
   callId: string,
   text: string,
   tts: TtsSession,
+  options?: TtsOptions,
 ): Promise<void> {
   const session = sessions.get(callId);
   if (!session || !text.trim()) return;
 
-  const audio = await synthesizeHebrewSpeech(text);
+  const audio = await synthesizeHebrewSpeech(text, options);
   if (!audio || tts.isAborted()) {
     logger.warn({ callId, hasAudio: Boolean(audio) }, "speakOnCall skipped — no TTS audio");
     return;

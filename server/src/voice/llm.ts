@@ -8,8 +8,12 @@ export interface LlmResponse {
   outcome?: "sold" | "refused" | "callback" | null;
 }
 
+import type { ContactSex } from "@prisma/client";
+import { genderPromptHint } from "../utils/genderHebrew.js";
+
 export interface SalesReplyContext {
   customerFirstName: string;
+  customerSex?: ContactSex;
   stagePrompt: string;
   isOpeningTurn?: boolean;
   channelContext?: string;
@@ -70,7 +74,7 @@ export async function generateSalesReply(
             { role: "system", content: SYSTEM_PROMPT },
             {
               role: "system",
-              content: `שם פרטי (להקשר בלבד): ${context.customerFirstName}. שלב נוכחי: ${context.stagePrompt}. ${productContext}${context.nodeText ? `. הנחיית צומת: ${context.nodeText}` : ""}`,
+              content: `שם פרטי (להקשר בלבד): ${context.customerFirstName}. ${genderPromptHint(context.customerSex ?? "male")} שלב נוכחי: ${context.stagePrompt}. ${productContext}${context.nodeText ? `. הנחיית צומת: ${context.nodeText}` : ""}`,
             },
             {
               role: "user",

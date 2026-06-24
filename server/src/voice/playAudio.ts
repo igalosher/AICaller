@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { synthesizeHebrewSpeechMp3 } from "./tts.js";
+import { synthesizeHebrewSpeechMp3, type TtsOptions } from "./tts.js";
 
 interface Clip {
   buffer: Buffer;
@@ -10,8 +10,8 @@ interface Clip {
 const clips = new Map<string, Clip>();
 const TTL_MS = 10 * 60 * 1000;
 
-export async function createPlayClip(text: string): Promise<string | null> {
-  const buffer = await synthesizeHebrewSpeechMp3(text);
+export async function createPlayClip(text: string, options?: TtsOptions): Promise<string | null> {
+  const buffer = await synthesizeHebrewSpeechMp3(text, options);
   if (!buffer?.length) return null;
 
   const id = randomUUID();

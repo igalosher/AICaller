@@ -1,3 +1,4 @@
+import type { ContactSex } from "@prisma/client";
 import { prisma } from "../db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import {
@@ -88,15 +89,18 @@ export function isTestCall(externalCallId: string | null | undefined): boolean {
   return Boolean(externalCallId?.startsWith("test-"));
 }
 
-function templateVars(firstName: string, familyName: string) {
+function templateVars(firstName: string, familyName: string, sex: ContactSex = "male") {
   const full = contactFullName(firstName, familyName);
   return {
     customer_name: full,
     customer_full_name: full,
     customer_first_name: firstName,
+    customer_sex: sex,
     agent_name: "סיגל",
   };
 }
+
+type ContactForSpeech = { firstName: string; familyName: string; sex: ContactSex };
 
 function createSessionEngine(flow: {
   stagesJson: string;
@@ -184,14 +188,14 @@ async function buildProductContext(
 
 async function speakFromNode(
   node: SpeakNode,
-  contact: { firstName: string; familyName: string },
+  contact: ContactForSpeech,
   userMessage?: string,
   entities?: { channel?: string; packet?: string },
   intentId?: string,
   flowVariables?: Record<string, unknown>,
 ): Promise<string> {
   const vars = mergeTemplateVars(
-    templateVars(contact.firstName, contact.familyName),
+    templateVars(contact.firstName, contact.familyName, contact.sex),
     flowVariablesForTemplate(flowVariables ?? {}),
   );
   let text = resolveTemplate(node.text, vars);
@@ -200,6 +204,7 @@ async function speakFromNode(
     const productCtx = await buildProductContext(intentId ?? "", entities);
     const reply = await generateSalesReply(userMessage ?? text, {
       customerFirstName: contact.firstName,
+      customerSex: contact.sex,
       stagePrompt: text,
       nodeText: text,
       ...productCtx,
@@ -304,7 +309,7 @@ async function preloadOpeningAudio(
       );
     }
 
-    const clipId = await createPlayClip(sayText);
+    const clipId = await createPlayClip(sayText, { addresseeSex: contact.sex });
     if (clipId) {
       preloadedOpeningClips.set(callId, { clipId, sayText });
       logger.info({ callId }, "Preloaded opening audio before dial");
@@ -494,12 +499,17 @@ export async function beginOutboundVoice(callId: string): Promise<void> {
 
 async function runVoiceSession(callId: string) {
   const turn = await prepareInitialVoiceTurn(callId);
+  const call = await prisma.call.findUnique({
+    where: { id: callId },
+    include: { contact: true },
+  });
   const tts = new TtsSession();
   const session = activeSessions.get(callId);
   if (session) session.tts = tts;
-  await speakOnCall(callId, turn.sayText, tts);
+  await speakOnCall(callId, turn.sayText, tts, {
+    addresseeSex: call?.contact?.sex,
+  });
 
-  const call = await prisma.call.findUnique({ where: { id: callId } });
   if (call?.externalCallId?.startsWith("mock-")) {
     await finalizeCall(callId, "sold");
   }
@@ -583,6 +593,7 @@ export async function prepareInitialVoiceTurn(
     if (stage) {
       const reply = await generateSalesReply(stage.prompt, {
         customerFirstName: call.contact.firstName,
+        customerSex: call.contact.sex,
         stagePrompt: stage.prompt,
         isOpeningTurn: true,
       });
@@ -783,7 +794,7 @@ async function processGraphTurn(
         ? resolveTemplate(
             speakNode.text,
             mergeTemplateVars(
-              templateVars(call.contact.firstName, call.contact.familyName),
+              templateVars(call.contact.firstName, call.contact.familyName, call.contact.sex),
               flowVariablesForTemplate(ctx.variables ?? {}),
             ),
           )
@@ -816,7 +827,7 @@ async function processGraphTurn(
         ? resolveTemplate(
             speakNode.text,
             mergeTemplateVars(
-              templateVars(call.contact.firstName, call.contact.familyName),
+              templateVars(call.contact.firstName, call.contact.familyName, call.contact.sex),
               flowVariablesForTemplate(ctx.variables ?? {}),
             ),
           )
@@ -825,6 +836,7 @@ async function processGraphTurn(
     const productCtx = await buildProductContext(classification.intentId, classification.entities);
     const reply = await generateSalesReply(text, {
       customerFirstName: call.contact.firstName,
+      customerSex: call.contact.sex,
       stagePrompt,
       ...productCtx,
     });
@@ -973,6 +985,7 @@ async function processLinearTurn(
   const stage = engine.getCurrentStage();
   const reply = await generateSalesReply(text, {
     customerFirstName: call.contact.firstName,
+    customerSex: call.contact.sex,
     stagePrompt: stage?.prompt ?? "",
   });
 
@@ -1013,7 +1026,11 @@ export async function handleCustomerSpeech(callId: string, text: string) {
     turn = { sayText: "סליחה, אירעה שגיאה. אשמח לנסות שוב.", endCall: false };
   }
 
-  const call = await prisma.call.findUnique({ where: { id: callId } });
+  const call = await prisma.call.findUnique({
+    where: { id: callId },
+    include: { contact: true },
+  });
+  const ttsOpts = { addresseeSex: call?.contact?.sex };
   const isTwilio =
     call?.externalCallId &&
     !call.externalCallId.startsWith("mock-") &&
@@ -1025,7 +1042,7 @@ export async function handleCustomerSpeech(callId: string, text: string) {
   }
 
   if (isTestCall(call?.externalCallId)) {
-    await speakToBrowser(callId, turn.sayText, turn.endCall);
+    await speakToBrowser(callId, turn.sayText, turn.endCall, ttsOpts);
     return;
   }
 
@@ -1034,7 +1051,7 @@ export async function handleCustomerSpeech(callId: string, text: string) {
   const replyTts = new TtsSession();
   const updated = activeSessions.get(callId);
   if (updated) updated.tts = replyTts;
-  await speakOnCall(callId, turn.sayText, replyTts);
+  await speakOnCall(callId, turn.sayText, replyTts, ttsOpts);
 }
 
 export async function handleBargeIn(callId: string, audioChunk: Buffer) {
@@ -1181,7 +1198,13 @@ registerBrowserTestHandlers({
     voiceSessionsStarted.add(callId);
     const turn = await prepareInitialVoiceTurn(callId);
     if (!turn.sayText.trim()) return;
-    await speakToBrowser(callId, turn.sayText, turn.endCall);
+    const call = await prisma.call.findUnique({
+      where: { id: callId },
+      include: { contact: true },
+    });
+    await speakToBrowser(callId, turn.sayText, turn.endCall, {
+      addresseeSex: call?.contact?.sex,
+    });
   },
   onSessionEnd: async (callId) => {
     await new Promise((r) => setTimeout(r, 5000));

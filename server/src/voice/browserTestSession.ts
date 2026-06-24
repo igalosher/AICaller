@@ -1,7 +1,7 @@
 import type WebSocket from "ws";
 import { prisma } from "../db.js";
 import { logger } from "../logger.js";
-import { synthesizeHebrewSpeechMp3 } from "./tts.js";
+import { synthesizeHebrewSpeechMp3, type TtsOptions } from "./tts.js";
 
 type SpeechHandler = (callId: string, text: string) => Promise<void>;
 type SessionStartHandler = (callId: string) => Promise<void>;
@@ -131,11 +131,12 @@ export async function speakToBrowser(
   callId: string,
   text: string,
   endCall: boolean,
+  options?: TtsOptions,
 ): Promise<boolean> {
   const session = sessions.get(callId);
   if (!session || session.ws.readyState !== 1 || !text.trim()) return false;
 
-  const audio = await synthesizeHebrewSpeechMp3(text);
+  const audio = await synthesizeHebrewSpeechMp3(text, options);
   if (!audio?.length) {
     logger.warn({ callId }, "Browser test TTS skipped — no audio");
     return false;

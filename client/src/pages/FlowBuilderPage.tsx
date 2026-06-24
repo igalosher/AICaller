@@ -941,6 +941,10 @@ export function FlowBuilderPage() {
                 משתנים: {"{{customer_full_name}}"}, {"{{customer_first_name}}"}
                 {flowVariables.length > 0 && ", משתני זרימה למטה"}
               </p>
+              <p className="text-xs text-slate-500">
+                מגדר (כשהכתיב שונה): {"{{g:תרצה|תרצי}}"} — ענף ראשון לזכר, שני לנקבה. מילים כמו לך / אליך
+                מבוטאות לפי מין איש הקשר ב-TTS; אין צורך בסימון.
+              </p>
               {flowVariables.length > 0 && (
                 <div className="flex flex-wrap gap-1">
                   {flowVariables.map((v) => (

@@ -1,3 +1,4 @@
+import type { ContactSex } from "@prisma/client";
 import { resolveTemplate } from "../utils/template.js";
 import { contactFullName } from "../utils/name.js";
 import { lookupFiberAvailability } from "../services/fiberLookup.js";
@@ -16,7 +17,7 @@ import type { ClassificationResult } from "./graphTypes.js";
 export function renderStagedText(
   engine: StagedFlowEngine,
   stage: StagedStage,
-  contact: { firstName: string; familyName: string },
+  contact: { firstName: string; familyName: string; sex: ContactSex },
 ): string {
   const full = contactFullName(contact.firstName, contact.familyName);
   const ctx = engine.context;
@@ -26,6 +27,7 @@ export function renderStagedText(
     customer_full_name: full,
     customer_first_name: contact.firstName,
     customer_family_name: contact.familyName,
+    customer_sex: contact.sex,
     package_type: ctx.packageType ?? "חבילת טריפל",
     package_price: String(ctx.packagePrice ?? 149),
     final_price: String(ctx.finalPrice ?? ctx.packagePrice ?? 149),
@@ -123,6 +125,7 @@ export async function processStagedUtterance(
       const productCtx = await buildProductContext(classification.intentId, classification.entities);
       const reply = await generateSalesReply(userText, {
         customerFirstName: contact.firstName,
+        customerSex: contact.sex,
         stagePrompt: renderStagedText(engine, stage, contact),
         ...productCtx,
       });
@@ -263,6 +266,7 @@ async function resolveStageSpeech(
   if (stage.id === "offer_package" && userText) {
     const reply = await generateSalesReply(userText, {
       customerFirstName: contact.firstName,
+      customerSex: contact.sex,
       stagePrompt: text,
       nodeText: text,
     });
