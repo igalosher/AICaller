@@ -4,11 +4,15 @@
 TBD - created by archiving change yes-ai-sales-caller. Update Purpose after archive.
 ## Requirements
 ### Requirement: Hebrew speech output
-The AI caller SHALL speak Hebrew using natural-sounding text-to-speech suitable for telephony (8 kHz or higher, clear pronunciation of Israeli Hebrew).
+The AI caller SHALL speak Hebrew using natural-sounding text-to-speech suitable for telephony (8 kHz or higher, clear pronunciation of Israeli Hebrew). Synthesis SHALL respect the **addressee's gender** (`contact.sex`) for homographic second-person forms (same spelling, different pronunciation).
 
 #### Scenario: AI delivers pitch in Hebrew
 - **WHEN** the AI presents a sales packet during a call
 - **THEN** the customer hears fluent Hebrew audio over the phone line
+
+#### Scenario: Gender-appropriate homograph pronunciation
+- **WHEN** the scripted prompt includes "לך" and the contact is female
+- **THEN** the customer hears female second-person pronunciation (*lach*), not male (*lecha*)
 
 ### Requirement: Hebrew speech recognition
 The system SHALL transcribe customer speech in Hebrew in real time and pass each final segment to intent classification before flow navigation and response generation.
@@ -18,7 +22,7 @@ The system SHALL transcribe customer speech in Hebrew in real time and pass each
 - **THEN** the system transcribes the utterance, classifies intent (e.g., `ask_packet`), and routes to the flow node within 2 seconds
 
 ### Requirement: Barge-in interruption
-Customers SHALL be able to interrupt the AI while it is speaking. The system MUST stop TTS playback promptly and process the customer's utterance.
+Customers SHALL be able to interrupt the AI while it is speaking. The system MUST stop TTS playback promptly and process the customer's utterance. **Operator skip-speak in browser test calls is not a barge-in** — it stops audio without processing customer speech.
 
 #### Scenario: Customer interrupts mid-pitch
 - **WHEN** the AI is speaking a packet description and the customer starts talking
@@ -27,6 +31,10 @@ Customers SHALL be able to interrupt the AI while it is speaking. The system MUS
 #### Scenario: Resume after answering interruption
 - **WHEN** the AI finishes answering an interrupting product question during a staged interruptible stage
 - **THEN** the AI resumes listen mode for the **same** `currentStageId` without advancing the stage
+
+#### Scenario: Test call skip is not barge-in
+- **WHEN** an operator uses skip-speak during browser test call playback
+- **THEN** playback stops but no customer utterance is classified and interrupt routing does not run
 
 ### Requirement: Contextual product Q&A
 The AI SHALL answer customer questions about configured packets, **specific channels by name** (including per-channel descriptions and details), channel package membership, prices, contract terms, **internet speed tiers and options**, **router rental costs**, and **comparisons between available options** using the sales configuration and YES catalog knowledge base.

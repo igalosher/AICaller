@@ -1,7 +1,22 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { isAxiosError } from "axios";
+import { useState, type FormEvent } from "react";
 import { intentsApi } from "../api";
 import type { Intent } from "../types";
+
+function getErrorMessage(err: unknown): string {
+  if (isAxiosError(err) && err.response?.data?.error) {
+    return String(err.response.data.error);
+  }
+  return "שגיאה בשמירה";
+}
+
+const EMPTY_CREATE = {
+  id: "",
+  labelHe: "",
+  category: "custom",
+  descriptionHe: "",
+};
 
 export function IntentsPage() {
   const qc = useQueryClient();
@@ -9,8 +24,30 @@ export function IntentsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [newPhrase, setNewPhrase] = useState("");
   const [threshold, setThreshold] = useState(0.7);
+  const [showCreate, setShowCreate] = useState(false);
+  const [createForm, setCreateForm] = useState(EMPTY_CREATE);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const selected = intents?.find((i) => i.id === selectedId);
+
+  const createMutation = useMutation({
+    mutationFn: () =>
+      intentsApi.create({
+        id: createForm.id.trim(),
+        labelHe: createForm.labelHe.trim(),
+        category: createForm.category.trim() || "custom",
+        descriptionHe: createForm.descriptionHe.trim() || undefined,
+      }),
+    onSuccess: (intent) => {
+      setCreateForm(EMPTY_CREATE);
+      setShowCreate(false);
+      setCreateError(null);
+      setSelectedId(intent.id);
+      setThreshold(intent.confidenceThreshold ?? 0.7);
+      qc.invalidateQueries({ queryKey: ["intents"] });
+    },
+    onError: (err) => setCreateError(getErrorMessage(err)),
+  });
 
   const addExampleMutation = useMutation({
     mutationFn: () => intentsApi.addExample(selectedId!, newPhrase),
@@ -26,10 +63,92 @@ export function IntentsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["intents"] }),
   });
 
+  const onCreateSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    setCreateError(null);
+    if (!createForm.id.trim() || !createForm.labelHe.trim()) {
+      setCreateError("מזהה ושם בעברית הם שדות חובה");
+      return;
+    }
+    if (!/^[a-z][a-z0-9_]*$/.test(createForm.id.trim())) {
+      setCreateError("מזהה באנגלית בלבד: אותיות קטנות, מספרים וקו תחתון (למשל ask_wifi)");
+      return;
+    }
+    createMutation.mutate();
+  };
+
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
       <div className="space-y-4">
-        <h2 className="text-2xl font-bold">ניהול כוונות</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-2xl font-bold">ניהול כוונות</h2>
+          <button
+            type="button"
+            className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+            onClick={() => {
+              setShowCreate((v) => !v);
+              setCreateError(null);
+            }}
+          >
+            {showCreate ? "ביטול" : "כוונה חדשה"}
+          </button>
+        </div>
+
+        {showCreate && (
+          <form
+            className="space-y-3 rounded-xl border bg-white p-4"
+            onSubmit={onCreateSubmit}
+          >
+            <h3 className="font-semibold">יצירת כוונה</h3>
+            <div>
+              <label className="mb-1 block text-sm font-medium">מזהה (אנגלית)</label>
+              <input
+                className="w-full rounded border px-2 py-1 text-sm"
+                dir="ltr"
+                value={createForm.id}
+                onChange={(e) => setCreateForm((f) => ({ ...f, id: e.target.value }))}
+                placeholder="ask_wifi"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">שם בעברית</label>
+              <input
+                className="w-full rounded border px-2 py-1 text-sm"
+                value={createForm.labelHe}
+                onChange={(e) => setCreateForm((f) => ({ ...f, labelHe: e.target.value }))}
+                placeholder="שאלה על WiFi"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">קטגוריה</label>
+              <input
+                className="w-full rounded border px-2 py-1 text-sm"
+                value={createForm.category}
+                onChange={(e) => setCreateForm((f) => ({ ...f, category: e.target.value }))}
+                placeholder="product"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">תיאור (אופציונלי)</label>
+              <input
+                className="w-full rounded border px-2 py-1 text-sm"
+                value={createForm.descriptionHe}
+                onChange={(e) =>
+                  setCreateForm((f) => ({ ...f, descriptionHe: e.target.value }))
+                }
+              />
+            </div>
+            {createError && <p className="text-sm text-red-600">{createError}</p>}
+            <button
+              type="submit"
+              className="rounded bg-blue-600 px-4 py-2 text-sm text-white disabled:opacity-50"
+              disabled={createMutation.isPending}
+            >
+              {createMutation.isPending ? "שומר..." : "צור כוונה"}
+            </button>
+          </form>
+        )}
+
         <div className="overflow-hidden rounded-xl border bg-white">
           <table className="w-full text-sm">
             <thead className="bg-slate-50">

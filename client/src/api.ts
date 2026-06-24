@@ -74,6 +74,13 @@ export const callFlowsApi = {
 
 export const intentsApi = {
   list: () => api.get<import("./types").Intent[]>("/intents").then((r) => r.data),
+  create: (data: {
+    id: string;
+    labelHe: string;
+    descriptionHe?: string;
+    category?: string;
+    confidenceThreshold?: number;
+  }) => api.post<import("./types").Intent>("/intents", data).then((r) => r.data),
   update: (id: string, data: Partial<import("./types").Intent>) =>
     api.put<import("./types").Intent>(`/intents/${id}`, data).then((r) => r.data),
   addExample: (id: string, phrase: string) =>

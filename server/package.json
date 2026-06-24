@@ -17,7 +17,8 @@
     "test:sigal-graph-flow": "tsx scripts/test-sigal-graph-flow.ts",
     "test:flow-variables": "tsx scripts/test-flow-variables.ts",
     "test:staged-flow": "tsx scripts/test-staged-flow.ts",
-    "test:hebrew-gender-tts": "tsx scripts/test-hebrew-gender-tts.ts"
+    "test:hebrew-gender-tts": "tsx scripts/test-hebrew-gender-tts.ts",
+    "test:skip-speak": "tsx scripts/test-skip-speak.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.0",

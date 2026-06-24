@@ -27,6 +27,8 @@ interface BrowserTestSession {
   processingSpeech: boolean;
   lastFinalTranscript: string;
   lastFinalAt: number;
+  /** True after `play` sent until skip, stop, or customer speech interrupt. */
+  speaking: boolean;
 }
 
 const sessions = new Map<string, BrowserTestSession>();
@@ -88,6 +90,7 @@ export async function handleBrowserTestConnection(ws: WebSocket, callId: string)
     processingSpeech: false,
     lastFinalTranscript: "",
     lastFinalAt: 0,
+    speaking: false,
   });
   sessionReady = true;
 
@@ -104,7 +107,10 @@ async function dispatchBrowserTestMessage(callId: string, data: WebSocket.RawDat
   }
 }
 
-type BrowserClientMessage = { type: "start" } | { type: "text"; text: string };
+type BrowserClientMessage =
+  | { type: "start" }
+  | { type: "text"; text: string }
+  | { type: "skip_speak" };
 
 async function handleBrowserTestMessage(callId: string, message: BrowserClientMessage): Promise<void> {
   const session = sessions.get(callId);
@@ -119,6 +125,14 @@ async function handleBrowserTestMessage(callId: string, message: BrowserClientMe
         live.ws.send(JSON.stringify({ type: "error", message: "שגיאה בהפעלת שיחת הטסט" }));
       }
     });
+    return;
+  }
+
+  if (message.type === "skip_speak") {
+    if (!session.speaking) return;
+    session.speaking = false;
+    session.ws.send(JSON.stringify({ type: "stop_playback" }));
+    session.ws.send(JSON.stringify({ type: "speak_skipped" }));
     return;
   }
 
@@ -142,6 +156,7 @@ export async function speakToBrowser(
     return false;
   }
 
+  session.speaking = true;
   session.ws.send(
     JSON.stringify({
       type: "play",
@@ -160,6 +175,7 @@ export async function speakToBrowser(
 export function stopBrowserPlayback(callId: string): void {
   const session = sessions.get(callId);
   if (!session || session.ws.readyState !== 1) return;
+  session.speaking = false;
   session.ws.send(JSON.stringify({ type: "stop_playback" }));
 }
 
