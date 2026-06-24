@@ -117,6 +117,9 @@ function fallbackReply(userMessage: string, context: SalesReplyContext): LlmResp
   if (lower.includes("מה שלומך") || lower.includes("מה נשמע") || lower.includes("איך את")) {
     return { text: "תודה ששאלת! בסדר גמור, אשמח לעזור לך." };
   }
+  if (/^(היי|הי|שלום|הלו|hi|hey|hello)$/.test(lower.trim())) {
+    return { text: "היי! שמחה לדבר איתך." };
+  }
   if (matchesInsult(lower)) {
     return { text: "אני מבינה, אבל לא נעים לשמוע שפה כזו. בוא נמשיך בכבוד." };
   }
@@ -124,7 +127,7 @@ function fallbackReply(userMessage: string, context: SalesReplyContext): LlmResp
     return { text: "הבנתי. רק לוודא — האם אתה בטוח שאתה לא מעוניין?" };
   }
   return {
-    text: context.isOpeningTurn ? context.stagePrompt : context.stagePrompt,
+    text: context.stagePrompt || "אשמח לעזור. אפשר לחזור על השאלה?",
   };
 }
 

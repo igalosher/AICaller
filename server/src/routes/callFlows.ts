@@ -34,6 +34,34 @@ const graphSchema = z.object({
   nodes: z.array(z.record(z.string(), z.unknown())),
   edges: z.array(z.record(z.string(), z.unknown())),
   startNodeId: z.string(),
+  variables: z
+    .array(
+      z.object({
+        name: z.string(),
+        type: z.enum(["string", "int", "bool", "json"]),
+        defaultValue: z.unknown().optional(),
+      }),
+    )
+    .optional(),
+  lookupTables: z
+    .array(
+      z.object({
+        name: z.string(),
+        rows: z.array(z.record(z.string(), z.unknown())),
+      }),
+    )
+    .optional(),
+  variableBindings: z
+    .array(
+      z.object({
+        listenNodeId: z.string(),
+        variableName: z.string(),
+        source: z.enum(["entity", "intent", "raw_text"]),
+        path: z.string().optional(),
+      }),
+    )
+    .optional(),
+  interruptQa: z.boolean().optional(),
 });
 
 router.get("/", async (_req, res, next) => {

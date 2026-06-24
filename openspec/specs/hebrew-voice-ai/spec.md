@@ -25,8 +25,8 @@ Customers SHALL be able to interrupt the AI while it is speaking. The system MUS
 - **THEN** AI speech stops within 500 ms and the customer's speech is captured and processed
 
 #### Scenario: Resume after answering interruption
-- **WHEN** the AI finishes answering an interrupting question
-- **THEN** the AI resumes the call flow from an appropriate point (not repeating the entire previous segment unless configured)
+- **WHEN** the AI finishes answering an interrupting product question during a staged interruptible stage
+- **THEN** the AI resumes listen mode for the **same** `currentStageId` without advancing the stage
 
 ### Requirement: Contextual product Q&A
 The AI SHALL answer customer questions about configured packets, **specific channels by name** (including per-channel descriptions and details), channel package membership, prices, contract terms, **internet speed tiers and options**, **router rental costs**, and **comparisons between available options** using the sales configuration and YES catalog knowledge base.
@@ -60,14 +60,18 @@ The AI SHALL answer customer questions about configured packets, **specific chan
 - **THEN** the AI acknowledges uncertainty in Hebrew and follows the flow's default or clarify branch (or offers callback per node configuration)
 
 ### Requirement: Conversational sales behavior
-The AI SHALL conduct outbound sales conversations as **Sigal**, guided by the active flow graph node and classified intent: greet by name, handle small talk and insults per tone rules, present offers, handle objections via intent branches, use **confirmed refusal** before ending on not-interested, and attempt to close or record outcome.
+The AI SHALL conduct outbound sales conversations as **Sigal**, guided by the active **staged flow** or graph flow and classified intent: greet by full name, present the scripted opener with opt-out language, answer product questions via the global Q&A interrupt, advance stages per rules, handle small talk and insults per tone rules where configured, use confirmed refusal on graph flows, and attempt to close or record outcome.
+
+#### Scenario: Opt-out ends call immediately
+- **WHEN** the customer utterance is classified as `opt_out_remove`
+- **THEN** the AI speaks "תודה רבה ויום נעים", ends the call, and sets contact status to `blacklisted`
 
 #### Scenario: Successful close detection
 - **WHEN** the customer utterance is classified as `agree_purchase` with sufficient confidence
-- **THEN** the AI follows the close branch, confirms selection, summarizes terms, and marks the call outcome as `sold`
+- **THEN** the AI follows the close branch or stage, confirms selection, summarizes terms, and marks the call outcome as `sold`
 
-#### Scenario: Refusal detection
-- **WHEN** the customer utterance is classified as `not_interested` on first indication
+#### Scenario: Refusal detection (graph flows)
+- **WHEN** the customer utterance is classified as `not_interested` on first indication on a graph flow
 - **THEN** the AI follows the confirmation branch rather than immediately hanging up
 
 #### Scenario: Confirmed refusal ends call
@@ -89,9 +93,17 @@ End-to-end voice round-trip (customer speech end → AI response audio start) SH
 - **THEN** the AI begins speaking its response within 2 seconds in 90% of utterances during testing
 
 ### Requirement: Intent-driven flow navigation
-After each classified customer utterance, the voice pipeline SHALL advance the call's active graph node according to flow edges matching the intent (or default edge), then generate the next speak content from that node.
+After each classified customer utterance, the voice pipeline SHALL advance the call according to the active engine: **staged** (`currentStageId`, `advanceOn`, opt-out, Q&A interrupt) or **graph** (edges matching intent), then generate the next speak content.
 
-#### Scenario: Branch on channel question
-- **WHEN** classification returns `ask_channel` with entity channel name
+#### Scenario: Staged advance after offer question
+- **WHEN** classification returns `ask_offer` on stage `opening` of a staged flow
+- **THEN** the engine advances to the next stage and speaks that stage's script
+
+#### Scenario: Branch on channel question (graph)
+- **WHEN** classification returns `ask_channel` with entity channel name on a graph flow
 - **THEN** the engine moves to the channel Q&A branch node and the LLM receives channel context from the catalog
+
+#### Scenario: Q&A interrupt on staged flow
+- **WHEN** classification returns `ask_packet` on an interruptible staged stage that does not list `ask_packet` in `advanceOn`
+- **THEN** the engine generates a catalog-backed answer and remains on the same stage
 

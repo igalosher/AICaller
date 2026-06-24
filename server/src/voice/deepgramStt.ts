@@ -3,6 +3,11 @@ import { logger } from "../logger.js";
 
 export type TranscriptHandler = (text: string, isFinal: boolean) => void;
 
+export type DeepgramAudioConfig = {
+  encoding?: string;
+  sampleRate?: number;
+};
+
 export class DeepgramSttSession {
   private ws: WebSocket | null = null;
   private closed = false;
@@ -10,12 +15,15 @@ export class DeepgramSttSession {
   constructor(
     private apiKey: string,
     private onTranscript: TranscriptHandler,
+    private audioConfig: DeepgramAudioConfig = {},
   ) {}
 
   async connect(): Promise<void> {
+    const encoding = this.audioConfig.encoding ?? "mulaw";
+    const sampleRate = this.audioConfig.sampleRate ?? 8000;
     const params = new URLSearchParams({
-      encoding: "mulaw",
-      sample_rate: "8000",
+      encoding,
+      sample_rate: String(sampleRate),
       channels: "1",
       model: "nova-3",
       language: "he",

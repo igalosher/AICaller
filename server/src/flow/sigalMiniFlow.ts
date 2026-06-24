@@ -74,6 +74,7 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   const dy = 220;
 
   const opening = b.stage("opening", "פתיחה", STAGED_OPENING, { x, y: y });
+  b.speak("speak_hi", "ברכה", "היוש", { x: x - 220, y: y + 80 });
   y += dy;
   const tv = b.stage(
     "tv",
@@ -186,13 +187,16 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   // Opening → TV
   b.link(opening.route, tv.speak, { intentId: "ask_offer", label: "מה ההצעה" });
   b.link(opening.route, tv.speak, { intentId: "silence", label: "שתיקה" });
+  b.link(opening.route, "speak_hi", { intentId: "greeting_hi", label: "ברכה" });
   b.link(opening.route, tv.speak, { intentId: "greeting_ack", label: "המשך" });
+  b.link("speak_hi", tv.speak);
   b.link(opening.route, tv.speak, { isDefault: true, label: "ברירת מחדל" });
   b.link(opening.route, "goodbye_blacklist", { intentId: "opt_out_remove", label: "הסר" });
 
   // TV → Internet
   b.link(tv.route, inet.speak, { intentId: "provide_tv_count", label: "מספר טלוויזיות" });
   b.link(tv.route, tv.speak, { intentId: "silence", label: "שתיקה" });
+  b.link(tv.route, tv.speak, { intentId: "greeting_ack", label: "המשך" });
   b.link(tv.route, tv.speak, { isDefault: true, label: "חזרה על שאלה" });
   b.link(tv.route, "goodbye_blacklist", { intentId: "opt_out_remove", label: "הסר" });
 
@@ -275,11 +279,152 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   b.link("goodbye_polite", "end_refused");
   b.link("goodbye_blacklist", "end_blacklist");
 
-  return {
+  return enhanceSigalGraph({
     startNodeId: opening.speak,
     nodes: b.nodes,
     edges: b.edges,
+    variables: [{ name: "NumOfTVs", type: "int", defaultValue: 0 }],
+    lookupTables: [
+      {
+        name: "Channels",
+        rows: [
+          { name: "ספורט 5", tier: "premium" },
+          { name: "ערוץ 12", tier: "basic" },
+        ],
+      },
+    ],
+  });
+}
+
+export function patchSigalFlowVariables(graph: FlowGraph): FlowGraph {
+  return {
+    ...graph,
+    variableBindings: graph.variableBindings?.length
+      ? graph.variableBindings
+      : [
+          {
+            listenNodeId: "listen_tv",
+            variableName: "NumOfTVs",
+            source: "entity",
+          },
+        ],
+    variables: graph.variables?.length
+      ? graph.variables
+      : [{ name: "NumOfTVs", type: "int" as const, defaultValue: 0 }],
+    lookupTables: graph.lookupTables ?? [],
+    interruptQa: graph.interruptQa ?? true,
   };
+}
+
+const BLACKLIST_SPEAK = "goodbye_blacklist";
+
+function speakRepeatTarget(routeId: string, outgoing: FlowEdge[]): string | undefined {
+  const stage = routeId.replace(/^route_/, "");
+  const stageSpeak = `speak_${stage}`;
+  if (outgoing.some((e) => e.target === stageSpeak)) return stageSpeak;
+  return outgoing.find((e) => e.target.startsWith("speak_") && e.target !== "speak_hi")?.target;
+}
+
+/** Fix corrupted defaults (e.g. blacklist as default) and clean up greeting routing. */
+export function patchSigalGraphRouting(graph: FlowGraph): FlowGraph {
+  if (!isSigalMiniFlowGraph(graph)) return graph;
+
+  let nodes = [...graph.nodes];
+  let edges = [...graph.edges];
+
+  const hasSpeakHi = nodes.some((n) => n.id === "speak_hi");
+  const tvSpeak = nodes.some((n) => n.id === "speak_tv") ? "speak_tv" : undefined;
+
+  if (!hasSpeakHi) {
+    edges = edges.filter((e) => e.source !== "speak_hi" && e.target !== "speak_hi");
+    if (tvSpeak) {
+      edges = edges.map((e) =>
+        e.source === "route_opening" && e.intentId === "greeting_hi"
+          ? { ...e, target: tvSpeak, label: e.label ?? "ברכה" }
+          : e,
+      );
+    }
+  } else if (tvSpeak && !edges.some((e) => e.source === "speak_hi" && e.target === tvSpeak)) {
+    edges.push({ id: "e_speak_hi_tv", source: "speak_hi", target: tvSpeak });
+  }
+
+  for (const routeId of ["route_opening"]) {
+    if (!nodes.some((n) => n.id === routeId)) continue;
+    edges = edges.filter(
+      (e) =>
+        !(
+          e.source === routeId &&
+          e.intentId === "greeting_ack" &&
+          e.target === "speak_hi"
+        ),
+    );
+    if (!hasSpeakHi) continue;
+    const hasGreetingHi = edges.some(
+      (e) => e.source === routeId && e.intentId === "greeting_hi" && e.target === "speak_hi",
+    );
+    if (!hasGreetingHi) {
+      edges = edges.map((e) =>
+        e.source === routeId && e.intentId === "greeting_ack" && e.target === "speak_hi"
+          ? { ...e, intentId: "greeting_hi", label: e.label ?? "ברכה" }
+          : e,
+      );
+      if (!edges.some((e) => e.source === routeId && e.intentId === "greeting_hi")) {
+        edges.push({
+          id: `e_${routeId}_greeting_hi`,
+          source: routeId,
+          target: "speak_hi",
+          intentId: "greeting_hi",
+          label: "ברכה",
+        });
+      }
+    }
+  }
+
+  if (nodes.some((n) => n.id === "route_tv") && tvSpeak) {
+    edges = edges
+      .filter(
+        (e) =>
+          !(
+            e.source === "route_tv" &&
+            e.intentId === "greeting_ack" &&
+            e.target === "speak_hi"
+          ),
+      )
+      .map((e) =>
+        e.source === "route_tv" && e.intentId === "greeting_ack" && e.target === "speak_hi"
+          ? { ...e, target: tvSpeak, label: e.label ?? "המשך" }
+          : e,
+      );
+    if (!edges.some((e) => e.source === "route_tv" && e.intentId === "greeting_ack")) {
+      edges.push({
+        id: "e_route_tv_greeting_ack",
+        source: "route_tv",
+        target: tvSpeak,
+        intentId: "greeting_ack",
+        label: "המשך",
+      });
+    }
+  }
+
+  const routeIds = new Set(nodes.filter((n) => n.type === "intent_route").map((n) => n.id));
+  edges = edges.map((e) => {
+    if (!routeIds.has(e.source) || !e.isDefault || e.target !== BLACKLIST_SPEAK) return e;
+    const outgoing = edges.filter((x) => x.source === e.source);
+    const repeat = speakRepeatTarget(e.source, outgoing);
+    if (!repeat) return e;
+    return {
+      ...e,
+      target: repeat,
+      intentId: undefined,
+      label: e.label?.includes("חזרה") ? e.label : "חזרה על שאלה",
+    };
+  });
+
+  return { ...graph, nodes, edges };
+}
+
+export function enhanceSigalGraph(graph: FlowGraph): FlowGraph {
+  return patchSigalFlowVariables(patchSigalGraphRouting(graph));
 }
 
 export function isSigalMiniFlowGraph(graph: FlowGraph): boolean {

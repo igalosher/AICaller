@@ -2,9 +2,11 @@ import { Router } from "express";
 import {
   getActiveCall,
   getCall,
+  hangUpCall,
   listCalls,
   startCall,
   startNextCall,
+  startTestCall,
   updateCallStatus,
 } from "../services/callService.js";
 
@@ -43,6 +45,24 @@ router.post("/start", async (req, res, next) => {
   try {
     const { contactId } = req.body as { contactId: string };
     res.status(201).json(await startCall(contactId));
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post("/test-start", async (req, res, next) => {
+  try {
+    const { contactId } = req.body as { contactId: string };
+    res.status(201).json(await startTestCall(contactId));
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post("/:id/hangup", async (req, res, next) => {
+  try {
+    await hangUpCall(String(req.params.id));
+    res.json({ ok: true });
   } catch (e) {
     next(e);
   }

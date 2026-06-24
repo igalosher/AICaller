@@ -6,10 +6,12 @@ import { logger } from "./logger.js";
 import { registerWsClient } from "./websocket/callEvents.js";
 import { runSeed } from "./seed.js";
 import { recoverStuckContacts } from "./services/callService.js";
+import { warnIfWebhookUnreachable } from "./telephony/tunnelManager.js";
 import {
   handleTwilioMediaMessage,
   unregisterMediaStreamForWs,
 } from "./voice/mediaSession.js";
+import { handleBrowserTestConnection } from "./voice/browserTestSession.js";
 
 const port = Number(process.env.PORT ?? 3001);
 const app = createApp();
@@ -41,12 +43,30 @@ mediaWss.on("connection", (ws) => {
   });
 });
 
+const testCallWss = new WebSocketServer({ noServer: true });
+testCallWss.on("connection", (ws, req) => {
+  const url = new URL(req.url ?? "", "http://localhost");
+  const callId = url.searchParams.get("callId");
+  if (!callId) {
+    ws.close();
+    return;
+  }
+  void handleBrowserTestConnection(ws, callId);
+});
+
 server.on("upgrade", (req, socket, head) => {
   const path = req.url?.split("?")[0];
 
   if (path === "/ws/calls") {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req);
+    });
+    return;
+  }
+
+  if (path === "/ws/test-call") {
+    testCallWss.handleUpgrade(req, socket, head, (ws) => {
+      testCallWss.emit("connection", ws, req);
     });
     return;
   }
@@ -60,30 +80,6 @@ server.on("upgrade", (req, socket, head) => {
 
   socket.destroy();
 });
-
-async function warnIfWebhookUnreachable() {
-  if (process.env.TELEPHONY_PROVIDER !== "twilio") return;
-  const url = process.env.TWILIO_WEBHOOK_BASE_URL;
-  if (!url || url.includes("localhost")) {
-    logger.warn("TWILIO_WEBHOOK_BASE_URL is local — Twilio cannot reach it. Use: npm run dev:twilio");
-    return;
-  }
-  try {
-    const res = await fetch(`${url}/api/webhooks/twilio/voice?callId=startup`, {
-      method: "POST",
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) {
-      logger.warn({ status: res.status, url }, "Twilio webhook URL returned an error");
-    }
-  } catch (err) {
-    logger.warn(
-      { url },
-      "Twilio webhook URL unreachable — voice calls will show Application Error. Use: npm run dev:twilio",
-    );
-    logger.debug({ err }, "Webhook probe failed");
-  }
-}
 
 async function main() {
   await runSeed();

@@ -29,6 +29,9 @@ function getErrorMessage(err: unknown, fallback: string): string {
   if (isAxiosError(err) && err.response?.data?.error) {
     return String(err.response.data.error);
   }
+  if (err instanceof Error && err.message) {
+    return err.message;
+  }
   return fallback;
 }
 
@@ -45,6 +48,7 @@ export function ContactsPage() {
   const [callError, setCallError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [callingId, setCallingId] = useState<string | null>(null);
+  const [testCallingId, setTestCallingId] = useState<string | null>(null);
 
   const { data } = useQuery({
     queryKey: ["contacts", search, status],
@@ -84,6 +88,26 @@ export function ContactsPage() {
     },
   });
 
+  const testCallMutation = useMutation({
+    mutationFn: (contactId: string) => callsApi.startTest(contactId),
+    onMutate: (contactId) => {
+      setCallError(null);
+      setTestCallingId(contactId);
+    },
+    onSuccess: (call) => {
+      qc.invalidateQueries({ queryKey: ["contacts"] });
+      qc.invalidateQueries({ queryKey: ["calls"] });
+      qc.invalidateQueries({ queryKey: ["activeCall"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+      setTestCallingId(null);
+      navigate("/calls", { state: { testCallId: call.id } });
+    },
+    onError: (err) => {
+      setCallError(getErrorMessage(err, "שגיאה בהפעלת שיחת הטסט"));
+      setTestCallingId(null);
+      qc.invalidateQueries({ queryKey: ["contacts"] });
+    },
+  });
   const callMutation = useMutation({
     mutationFn: (contactId: string) => callsApi.start(contactId),
     onMutate: (contactId) => {
@@ -193,6 +217,21 @@ export function ContactsPage() {
                       onClick={() => callMutation.mutate(c.id)}
                     >
                       {callingId === c.id ? "מחייג..." : "התקשר"}
+                    </button>
+                    <button
+                      type="button"
+                      className="text-emerald-700 disabled:text-slate-400"
+                      disabled={
+                        c.status === "refused" ||
+                        c.status === "blacklisted" ||
+                        c.status === "in_call" ||
+                        testCallingId === c.id ||
+                        callingId === c.id
+                      }
+                      onClick={() => testCallMutation.mutate(c.id)}
+                      title={c.status === "in_call" ? "סיים את השיחה הפעילה בדף שיחות" : undefined}
+                    >
+                      {testCallingId === c.id ? "מתחיל..." : "שיחת טסט"}
                     </button>
                     <button
                       type="button"

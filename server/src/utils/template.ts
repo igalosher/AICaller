@@ -10,3 +10,10 @@ export function resolveTemplate(
     return vars[key] ?? "";
   });
 }
+
+export function mergeTemplateVars(
+  contactVars: Record<string, string>,
+  flowVars: Record<string, string>,
+): Record<string, string> {
+  return { ...flowVars, ...contactVars };
+}

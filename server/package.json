@@ -15,6 +15,7 @@
     "test:visual-flow": "tsx scripts/test-visual-flow.ts",
     "test:sigal-miniflow": "tsx scripts/test-sigal-miniflow.ts",
     "test:sigal-graph-flow": "tsx scripts/test-sigal-graph-flow.ts",
+    "test:flow-variables": "tsx scripts/test-flow-variables.ts",
     "test:staged-flow": "tsx scripts/test-staged-flow.ts"
   },
   "dependencies": {

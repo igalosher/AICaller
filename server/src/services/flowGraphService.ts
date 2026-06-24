@@ -1,13 +1,14 @@
 import { prisma } from "../db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { validateFlowGraph } from "../flow/graphValidation.js";
-import { createSigalMiniFlowGraph, isSigalMiniFlowGraph, STAGED_OPENING } from "../flow/sigalMiniFlow.js";
+import { createSigalMiniFlowGraph, enhanceSigalGraph, isSigalMiniFlowGraph, STAGED_OPENING } from "../flow/sigalMiniFlow.js";
 import {
   SIGAL_OPENING,
   SIGAL_QUALIFY,
   SOLD_GOODBYE,
 } from "../flow/starterFlow.js";
 import { linearFlowToGraph } from "../flow/linearToGraph.js";
+import { normalizeFlowGraph } from "../flow/graphFlowEngine.js";
 import { parseCallFlow } from "./callFlowService.js";
 import type { FlowGraph } from "../flow/graphTypes.js";
 
@@ -40,8 +41,8 @@ export async function getDraftGraph(flowId: string): Promise<FlowGraph> {
     if (draftLooksTruncated || draftLostRouting) return published;
   }
 
-  if (draft) return draft;
-  if (published) return published;
+  if (draft) return enhanceSigalGraph(normalizeFlowGraph(draft));
+  if (published) return enhanceSigalGraph(normalizeFlowGraph(published));
   return createSigalMiniFlowGraph();
 }
 
@@ -217,5 +218,5 @@ export function getPublishedGraphForCall(flow: {
 }): FlowGraph | null {
   const json = flow.publishedGraphJson !== "{}" ? flow.publishedGraphJson : flow.draftGraphJson;
   if (!json || json === "{}") return null;
-  return JSON.parse(json) as FlowGraph;
+  return enhanceSigalGraph(JSON.parse(json) as FlowGraph);
 }

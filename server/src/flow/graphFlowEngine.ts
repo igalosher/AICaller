@@ -1,4 +1,5 @@
-import type { ClassificationResult, FlowGraph, FlowNode } from "./graphTypes.js";
+import type { ClassificationResult, FlowGraph, FlowNode, VariableBinding } from "./graphTypes.js";
+import { evaluateCondition } from "./conditionEvaluator.js";
 import { resolveTemplate } from "../utils/template.js";
 
 export class GraphFlowEngine {
@@ -72,6 +73,35 @@ export class GraphFlowEngine {
     return node;
   }
 
+  advanceByDecision(variables: Record<string, unknown>): FlowNode | null {
+    const node = this.getCurrentNode();
+    if (!node || node.type !== "decision") return node ?? null;
+
+    const outgoing = this.getOutgoingEdges();
+    const lookupTables = this.graph.lookupTables ?? [];
+
+    for (const edge of outgoing) {
+      if (edge.isDefault || !edge.condition) continue;
+      if (evaluateCondition(edge.condition, variables, lookupTables)) {
+        this.currentNodeId = edge.target;
+        return this.getCurrentNode() ?? null;
+      }
+    }
+
+    const defaultEdge = outgoing.find((e) => e.isDefault);
+    if (defaultEdge) {
+      this.currentNodeId = defaultEdge.target;
+      return this.getCurrentNode() ?? null;
+    }
+
+    if (outgoing.length === 1) {
+      this.currentNodeId = outgoing[0]!.target;
+      return this.getCurrentNode() ?? null;
+    }
+
+    return node;
+  }
+
   advanceFromListen(): FlowNode | null {
     const node = this.getCurrentNode();
     if (node?.type !== "listen") return node ?? null;
@@ -111,7 +141,28 @@ export function parseFlowGraph(json: string): FlowGraph {
   if (!parsed.startNodeId || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
     throw new Error("גרף זרימה לא תקין");
   }
-  return parsed;
+  return normalizeFlowGraph(parsed);
+}
+
+/** Lift legacy per-listen bindings to flow-level variableBindings */
+export function normalizeFlowGraph(graph: FlowGraph): FlowGraph {
+  if (graph.variableBindings?.length) return graph;
+
+  const legacyBindings: FlowGraph["variableBindings"] = [];
+  const nodes = graph.nodes.map((node) => {
+    const legacy = node as { type: string; bindings?: VariableBinding[] };
+    if (node.type === "listen" && legacy.bindings?.length) {
+      for (const binding of legacy.bindings) {
+        legacyBindings.push({ ...binding, listenNodeId: node.id });
+      }
+      const { bindings: _removed, ...rest } = legacy;
+      return rest as FlowGraph["nodes"][number];
+    }
+    return node;
+  });
+
+  if (!legacyBindings.length) return graph;
+  return { ...graph, nodes, variableBindings: legacyBindings };
 }
 
 export function createEngineFromGraph(

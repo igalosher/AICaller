@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { isAxiosError } from "axios";
 import { callsApi, connectCallEvents, intentsApi } from "../api";
 import { StatusBadge } from "../components/StatusBadge";
+import { TestCallAudio } from "../components/TestCallAudio";
 import type { Call, TranscriptSegment } from "../types";
 import { contactDisplayName } from "../types";
 
@@ -165,6 +166,24 @@ export function CallsPage() {
     return () => ws.close();
   }, [qc]);
 
+  const hangUpMutation = useMutation({
+    mutationFn: (callId: string) => callsApi.hangUp(callId),
+    onMutate: () => setCallError(null),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["calls"] });
+      qc.invalidateQueries({ queryKey: ["activeCall"] });
+      qc.invalidateQueries({ queryKey: ["contacts"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (err) => setCallError(getErrorMessage(err)),
+  });
+
+  const isActiveCallLive =
+    activeCall &&
+    (activeCall.status === "connected" ||
+      activeCall.status === "dialing" ||
+      activeCall.status === "ringing");
+
   const intentLabel = (intentId?: string) =>
     intents?.find((i) => i.id === intentId)?.labelHe ?? intentId ?? "—";
 
@@ -188,17 +207,34 @@ export function CallsPage() {
 
       {displayCall && (
         <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
-          <h3 className="font-semibold">
-            {activeCall ? "שיחה פעילה" : "פרטי שיחה"} —{" "}
-            {displayCall.contact ? contactDisplayName(displayCall.contact) : "—"}
-          </h3>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="font-semibold">
+              {activeCall ? "שיחה פעילה" : "פרטי שיחה"} —{" "}
+              {displayCall.contact ? contactDisplayName(displayCall.contact) : "—"}
+            </h3>
+            {isActiveCallLive && (
+              <button
+                type="button"
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm text-white disabled:opacity-60"
+                disabled={hangUpMutation.isPending}
+                onClick={() => hangUpMutation.mutate(activeCall!.id)}
+              >
+                {hangUpMutation.isPending ? "מנתק..." : "נתק שיחה"}
+              </button>
+            )}
+          </div>
+          {activeCall?.externalCallId?.startsWith("test-") && (
+            <div className="mb-3">
+              <TestCallAudio callId={activeCall.id} />
+            </div>
+          )}
           <p className="text-sm">
             צומת: {displayCall.currentNodeId ?? displayCall.currentStage ?? "—"}
           </p>
           <div className="mt-3 max-h-64 overflow-y-auto rounded-lg bg-white p-3 text-sm">
             {displayTranscript.map((t, i) => (
               <div key={`${t.speaker}-${i}-${t.text.slice(0, 24)}`} className="mb-2 border-b pb-2">
-                <p>
+                <p className="break-words">
                   <strong>{t.speaker === "ai" ? "AI" : "לקוח"}:</strong> {t.text}
                 </p>
                 {t.speaker === "customer" && t.intentId && (

@@ -25,6 +25,8 @@ export const callsApi = {
   active: () => api.get<Call | null>("/calls/active").then((r) => r.data),
   get: (id: string) => api.get<Call>(`/calls/${id}`).then((r) => r.data),
   start: (contactId: string) => api.post<Call>("/calls/start", { contactId }).then((r) => r.data),
+  startTest: (contactId: string) => api.post<Call>("/calls/test-start", { contactId }).then((r) => r.data),
+  hangUp: (id: string) => api.post<{ ok: boolean }>(`/calls/${id}/hangup`).then((r) => r.data),
   next: () => api.post<Call>("/calls/next").then((r) => r.data),
 };
 

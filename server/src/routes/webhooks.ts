@@ -3,9 +3,10 @@ import {
   updateCallStatus,
   onCallConnected,
   kickoffInitialVoice,
+  peekPreloadedOpening,
 } from "../services/callService.js";
 import { getPlayClip } from "../voice/playAudio.js";
-import { buildHoldTwiml } from "../voice/twilioPlay.js";
+import { buildAnswerWithPlayTwiml, buildHoldTwiml } from "../voice/twilioPlay.js";
 import type { CallOutcome, CallStatus } from "@prisma/client";
 
 const router = Router();
@@ -29,9 +30,15 @@ router.post("/twilio/voice", async (req, res) => {
     return;
   }
 
-  // Answer immediately so Twilio does not time out while we synthesize speech.
+  // Answer immediately. If opening audio was preloaded, play it in the same TwiML that
+  // starts the media stream (one stream for the whole call — never restart on each play).
+  const preloaded = peekPreloadedOpening(callId);
   res.type("text/xml");
-  res.send(await buildHoldTwiml(callId));
+  res.send(
+    preloaded
+      ? await buildAnswerWithPlayTwiml(callId, preloaded.clipId)
+      : await buildHoldTwiml(callId),
+  );
   void kickoffInitialVoice(callId);
 });
 

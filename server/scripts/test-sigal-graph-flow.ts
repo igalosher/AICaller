@@ -55,15 +55,24 @@ function routeTurn(
   }
 
   let spokeId: string | undefined;
-  if (node?.type === "speak") {
-    spokeId = node.id;
+  const spokenIds: string[] = [];
+  while (node?.type === "speak" && !node.id.startsWith("goodbye_")) {
+    spokenIds.push(node.id);
     ctx.lastSpokenText = speakText(engine, node.id);
     const edge = engine.getNextAutoEdge(node.id);
-    if (edge) {
-      engine.currentNodeId = edge.target;
-      node = engine.getCurrentNode();
+    if (!edge) {
+      node = undefined;
+      break;
     }
+    engine.currentNodeId = edge.target;
+    const next = engine.getCurrentNode();
+    if (next?.type !== "speak" || next.id.startsWith("goodbye_")) {
+      node = next;
+      break;
+    }
+    node = next;
   }
+  spokeId = spokenIds[0];
 
   if (node?.type === "speak" && node.id.startsWith("goodbye_")) {
     spokeId = node.id;
@@ -94,11 +103,18 @@ function testManualScenario74(engine: GraphFlowEngine) {
   const ctx: Ctx = {};
   afterOpening(engine);
 
-  let r = routeTurn(engine, cls("greeting_ack"), ctx);
-  assert(r.spokeId === "speak_tv", "opening advances to TV question");
-  assert(r.listenId === "listen_tv", "lands on listen_tv");
+  let r = routeTurn(engine, cls("greeting_hi"), ctx);
+  assert(r.spokeId === "speak_hi", "greeting plays היוש first");
+  assert(r.listenId === "listen_tv", "lands on listen_tv after TV question");
+  assert(ctx.lastSpokenText === speakText(engine, "speak_tv"), "last spoken is TV question");
+  log("opening → היוש → TV count question");
+
+  engine.currentNodeId = "listen_tv";
   ctx.lastSpokenText = speakText(engine, "speak_tv");
-  log("opening → TV count question");
+  r = routeTurn(engine, cls("greeting_ack"), ctx);
+  assert(r.spokeId === "speak_tv", "כן/המשך at TV repeats question, not היוש");
+  assert(r.listenId === "listen_tv", "still on listen_tv after repeat");
+  log("greeting_ack at TV → repeat question only");
 
   r = routeTurn(engine, cls("provide_tv_count", { tv_count: 2 }), ctx);
   assert(r.spokeId === "speak_inet", "TV answer advances to internet question");

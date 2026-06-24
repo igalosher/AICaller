@@ -34,6 +34,12 @@ const DEFAULT_INTENTS = [
     examples: ["כן", "בסדר", "ממשיכים", "אפשר לשמוע", "זמן טוב"],
   },
   {
+    id: "greeting_hi",
+    labelHe: "ברכת שלום",
+    category: "opening",
+    examples: ["היי", "שלום", "הלו", "היוש", "hi", "hello"],
+  },
+  {
     id: "price_objection",
     labelHe: "התנגדות מחיר",
     category: "objection",
@@ -432,6 +438,19 @@ function matchesSmallTalk(norm: string): boolean {
   );
 }
 
+function isHiGreeting(utterance: string): boolean {
+  const norm = normalize(utterance);
+  return (
+    norm === "היי" ||
+    norm === "הי" ||
+    norm === "שלום" ||
+    norm === "הלו" ||
+    norm === "hi" ||
+    norm === "hey" ||
+    norm === "hello"
+  );
+}
+
 function extractTvCount(norm: string): number | null {
   const digit = norm.match(/\d+/);
   if (digit) return Math.min(10, parseInt(digit[0]!, 10));
@@ -645,6 +664,10 @@ export async function classifyUtterance(
 
   const confirmResult = classifyRefusalConfirm(utterance, awaiting);
   if (confirmResult) return confirmResult;
+
+  if (isHiGreeting(utterance)) {
+    return { intentId: "greeting_hi", confidence: 0.92, entities: {}, classifier: "rule" };
+  }
 
   const stagedEarly = ruleStagedQualification(utterance);
   if (stagedEarly) return stagedEarly;

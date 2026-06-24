@@ -166,7 +166,9 @@ export async function handleTwilioMediaMessage(
   }
 
   if (message.event === "stop") {
-    unregisterMediaStream(callId);
+    if (session.twilioWs === twilioWs) {
+      unregisterMediaStream(callId);
+    }
   }
 }
 
