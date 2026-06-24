@@ -1,4 +1,10 @@
-import type { FlowEdge, FlowGraph, FlowNode } from "./graphTypes.js";
+import type {
+  FlowEdge,
+  FlowGraph,
+  FlowNode,
+  FlowVariableBinding,
+  FlowVariableDef,
+} from "./graphTypes.js";
 
 export const STAGED_OPENING = `שלום {{customer_first_name}} {{customer_family_name}},
 כאן סיגל מחברת YES, אני עוזרת דיגיטלית.
@@ -297,23 +303,126 @@ export function createSigalMiniFlowGraph(): FlowGraph {
 }
 
 export function patchSigalFlowVariables(graph: FlowGraph): FlowGraph {
+  const sideSpeakId = "side_small_talk";
+  const hasSideNode = graph.nodes.some((n) => n.id === sideSpeakId);
+  const nodes = hasSideNode
+    ? graph.nodes.map((n) =>
+        n.id === sideSpeakId && n.type === "speak"
+          ? {
+              ...n,
+              label: n.label ?? "שאלת שלומך",
+              text:
+                n.text && n.text !== "הכל טוב תודה! בוא נחזור להצעה."
+                  ? n.text
+                  : "תודה, אני בסדר גמור! נשמח להמשיך עם ההצעה.",
+              useLlm: n.useLlm ?? true,
+              returnsToMain: n.returnsToMain ?? true,
+            }
+          : n,
+      )
+    : [
+        ...graph.nodes,
+        {
+          id: sideSpeakId,
+          type: "speak" as const,
+          label: "שאלת שלומך",
+          text: "תודה, אני בסדר גמור! נשמח להמשיך עם ההצעה.",
+          useLlm: true,
+          returnsToMain: true,
+          position: { x: 900, y: 50 },
+        },
+      ];
+
+  const hasSmallTalkSideFlow = (graph.sideFlows ?? []).some((sf) => sf.intentId === "small_talk");
+  const sideFlows = hasSmallTalkSideFlow
+    ? graph.sideFlows
+    : [
+        ...(graph.sideFlows ?? []),
+        {
+          id: "sf_small_talk",
+          intentId: "small_talk",
+          entryNodeId: sideSpeakId,
+          label: "שאלת שלומך",
+        },
+      ];
+
+  const bindings = mergeAddressBinding({ ...graph, nodes });
+
   return {
     ...graph,
-    variableBindings: graph.variableBindings?.length
-      ? graph.variableBindings
-      : [
-          {
-            listenNodeId: "listen_tv",
-            variableName: "NumOfTVs",
-            source: "entity",
-          },
-        ],
-    variables: graph.variables?.length
-      ? graph.variables
-      : [{ name: "NumOfTVs", type: "int" as const, defaultValue: 0 }],
+    nodes,
+    variableBindings: bindings,
+    variables: ensureFlowVariables({ ...graph, variableBindings: bindings }),
     lookupTables: graph.lookupTables ?? [],
     interruptQa: graph.interruptQa ?? true,
+    sideFlows,
   };
+}
+
+function mergeAddressBinding(graph: FlowGraph): FlowVariableBinding[] {
+  const bindings: FlowVariableBinding[] = graph.variableBindings?.length
+    ? [...graph.variableBindings]
+    : [
+        {
+          listenNodeId: "listen_tv",
+          variableName: "NumOfTVs",
+          source: "entity",
+        },
+      ];
+  if (
+    !bindings.some((b) => b.listenNodeId === "listen_address") &&
+    graph.nodes.some((n) => n.id === "listen_address")
+  ) {
+    bindings.push({
+      listenNodeId: "listen_address",
+      variableName: "CustomerAddress",
+      source: "raw_text",
+    });
+  }
+  return bindings;
+}
+
+const DEFAULT_FLOW_VARIABLES: Record<string, FlowVariableDef> = {
+  NumOfTVs: { name: "NumOfTVs", type: "int", defaultValue: 0 },
+  CustomerAddress: { name: "CustomerAddress", type: "string", defaultValue: "" },
+};
+
+function defaultVariableDef(name: string): FlowVariableDef {
+  return (
+    DEFAULT_FLOW_VARIABLES[name] ?? {
+      name,
+      type: "string",
+      defaultValue: "",
+    }
+  );
+}
+
+/** Ensure flow-level variables exist for bindings and known listen nodes. */
+export function ensureFlowVariables(graph: FlowGraph): FlowVariableDef[] {
+  const variables = [...(graph.variables ?? [])];
+  const names = new Set(variables.map((v) => v.name));
+
+  const ensure = (name: string) => {
+    if (names.has(name)) return;
+    variables.push(defaultVariableDef(name));
+    names.add(name);
+  };
+
+  for (const binding of graph.variableBindings ?? []) {
+    ensure(binding.variableName);
+  }
+
+  if (graph.nodes.some((n) => n.id === "listen_address")) {
+    ensure("CustomerAddress");
+  }
+  if (graph.nodes.some((n) => n.id === "listen_tv")) {
+    ensure("NumOfTVs");
+  }
+
+  if (variables.length === 0) {
+    return [DEFAULT_FLOW_VARIABLES.NumOfTVs, DEFAULT_FLOW_VARIABLES.CustomerAddress];
+  }
+  return variables;
 }
 
 const BLACKLIST_SPEAK = "goodbye_blacklist";

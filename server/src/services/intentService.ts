@@ -11,6 +11,35 @@ import type { ClassificationResult } from "../flow/graphTypes.js";
 export interface ClassifyOptions {
   awaitingRefusalConfirm?: boolean;
   currentNodeId?: string;
+  /** When set, qualification intents only apply if listed (from route edges / bindings / staged advanceOn). */
+  scopedAnswerIntents?: string[];
+}
+
+const SCOPED_QUALIFICATION_INTENTS = new Set([
+  "provide_tv_count",
+  "internet_regular",
+  "internet_fiber",
+  "internet_unknown",
+  "no_internet",
+  "provider_bezeq",
+  "provider_hot",
+  "provider_partner",
+  "provider_cellcom",
+  "select_speed_100",
+  "select_speed_200",
+  "select_speed_300",
+  "select_speed_600",
+  "select_speed_1000",
+  "provide_current_price",
+  "provide_address",
+  "agree_callback",
+  "decline_callback",
+]);
+
+function passesListenScope(intentId: string, options: ClassifyOptions): boolean {
+  if (!options.scopedAnswerIntents) return true;
+  if (!SCOPED_QUALIFICATION_INTENTS.has(intentId)) return true;
+  return options.scopedAnswerIntents.includes(intentId);
 }
 
 const INSULT_PATTERNS = [
@@ -476,7 +505,14 @@ function extractPrice(norm: string): number | null {
   return null;
 }
 
-function ruleStagedQualification(utterance: string): ClassificationResult | null {
+function isTvCountAnswer(options: ClassifyOptions): boolean {
+  return options.scopedAnswerIntents?.includes("provide_tv_count") ?? false;
+}
+
+function ruleStagedQualification(
+  utterance: string,
+  options: ClassifyOptions = {},
+): ClassificationResult | null {
   const norm = normalize(utterance);
   if (norm === "הסר" || norm.includes("תסירו אותי") || norm.includes("הסירו אותי")) {
     return { intentId: "opt_out_remove", confidence: 0.98, entities: {}, classifier: "rule" };
@@ -494,55 +530,75 @@ function ruleStagedQualification(utterance: string): ClassificationResult | null
     return { intentId: "ask_offer", confidence: 0.92, entities: {}, classifier: "rule" };
   }
   if (norm.includes("אין לי אינטרנט") || norm.includes("בלי אינטרנט")) {
+    if (!passesListenScope("no_internet", options)) return null;
     return { intentId: "no_internet", confidence: 0.9, entities: {}, classifier: "rule" };
   }
   if (norm === "רגיל" || norm.includes("אינטרנט רגיל")) {
+    if (!passesListenScope("internet_regular", options)) return null;
     return { intentId: "internet_regular", confidence: 0.9, entities: {}, classifier: "rule" };
   }
   if (norm === "סיבים" || norm.includes("סיבים אופטיים") || norm.includes("פייבר")) {
+    if (!passesListenScope("internet_fiber", options)) return null;
     return { intentId: "internet_fiber", confidence: 0.9, entities: {}, classifier: "rule" };
   }
   if (norm.includes("לא יודע") || norm.includes("לא בטוח")) {
+    if (!passesListenScope("internet_unknown", options)) return null;
     return { intentId: "internet_unknown", confidence: 0.88, entities: {}, classifier: "rule" };
   }
   if (norm.includes("בזק")) {
+    if (!passesListenScope("provider_bezeq", options)) return null;
     return { intentId: "provider_bezeq", confidence: 0.9, entities: {}, classifier: "rule" };
   }
   if (norm.includes("הוט") || norm.includes("hot")) {
+    if (!passesListenScope("provider_hot", options)) return null;
     return { intentId: "provider_hot", confidence: 0.9, entities: {}, classifier: "rule" };
   }
   if (norm.includes("פרטנר") || norm.includes("partner")) {
+    if (!passesListenScope("provider_partner", options)) return null;
     return { intentId: "provider_partner", confidence: 0.9, entities: {}, classifier: "rule" };
   }
   if (norm.includes("סלקום") || norm.includes("cellcom")) {
+    if (!passesListenScope("provider_cellcom", options)) return null;
     return { intentId: "provider_cellcom", confidence: 0.9, entities: {}, classifier: "rule" };
   }
   if (norm.includes("גיגה") || norm.includes("אלף מגה")) {
+    if (!passesListenScope("select_speed_1000", options)) return null;
     return { intentId: "select_speed_1000", confidence: 0.88, entities: {}, classifier: "rule" };
   }
   if (norm.includes("שש מאות") || norm === "600") {
+    if (!passesListenScope("select_speed_600", options)) return null;
     return { intentId: "select_speed_600", confidence: 0.88, entities: {}, classifier: "rule" };
   }
   if (norm.includes("שלוש מאות") || norm === "300") {
+    if (!passesListenScope("select_speed_300", options)) return null;
     return { intentId: "select_speed_300", confidence: 0.88, entities: {}, classifier: "rule" };
   }
   if (norm.includes("מאתיים") || norm === "200") {
+    if (!passesListenScope("select_speed_200", options)) return null;
     return { intentId: "select_speed_200", confidence: 0.88, entities: {}, classifier: "rule" };
   }
   if (norm.includes("מאה מגה") || (norm.includes("מאה") && !norm.includes("מאתיים"))) {
+    if (!passesListenScope("select_speed_100", options)) return null;
     return { intentId: "select_speed_100", confidence: 0.85, entities: {}, classifier: "rule" };
   }
   const tv = extractTvCount(norm);
-  if (tv != null && (norm.includes("טלוויז") || norm.includes("מסך") || /^\d+$/.test(norm) || tv <= 6)) {
-    return {
-      intentId: "provide_tv_count",
-      confidence: 0.88,
-      entities: { tv_count: tv },
-      classifier: "rule",
-    };
+  if (tv != null) {
+    const mentionsTv = norm.includes("טלוויז") || norm.includes("מסך");
+    if (mentionsTv || isTvCountAnswer(options)) {
+      return {
+        intentId: "provide_tv_count",
+        confidence: 0.88,
+        entities: { tv_count: tv },
+        classifier: "rule",
+      };
+    }
   }
   const price = extractPrice(norm);
-  if (price != null && (norm.includes("משלם") || norm.includes("שקל") || norm.includes("₪"))) {
+  if (
+    price != null &&
+    (norm.includes("משלם") || norm.includes("שקל") || norm.includes("₪")) &&
+    passesListenScope("provide_current_price", options)
+  ) {
     return {
       intentId: "provide_current_price",
       confidence: 0.85,
@@ -550,7 +606,11 @@ function ruleStagedQualification(utterance: string): ClassificationResult | null
       classifier: "rule",
     };
   }
-  if (norm.length >= 8 && (norm.includes("רחוב") || norm.includes("תל אביב") || /\d/.test(norm))) {
+  if (
+    norm.length >= 8 &&
+    (norm.includes("רחוב") || norm.includes("תל אביב") || /\d/.test(norm)) &&
+    passesListenScope("provide_address", options)
+  ) {
     return {
       intentId: "provide_address",
       confidence: 0.8,
@@ -562,6 +622,45 @@ function ruleStagedQualification(utterance: string): ClassificationResult | null
     return { intentId: "agree_callback", confidence: 0.88, entities: {}, classifier: "rule" };
   }
   return null;
+}
+
+function looksLikeAddress(norm: string): boolean {
+  if (norm.length < 5) return false;
+  const cityHints = [
+    "תל אביב",
+    "ת\"א",
+    "ירושלים",
+    "חיפה",
+    "נתניה",
+    "באר שבע",
+    "ראשון",
+    "פתח תקווה",
+    "אשדוד",
+    "רחוב",
+    "שדרות",
+    "כיכר",
+    "מושב",
+    "קיבוץ",
+  ];
+  if (cityHints.some((h) => norm.includes(h))) return true;
+  if (/\d/.test(norm) && /[א-ת]/.test(norm)) return true;
+  return false;
+}
+
+function ruleAddressAnswer(
+  utterance: string,
+  options: ClassifyOptions,
+): ClassificationResult | null {
+  if (!options.scopedAnswerIntents?.includes("provide_address")) return null;
+  const norm = normalize(utterance);
+  if (!looksLikeAddress(norm)) return null;
+  if (matchesSmallTalk(norm) || matchesInsult(norm)) return null;
+  return {
+    intentId: "provide_address",
+    confidence: 0.82,
+    entities: { address: utterance.trim() },
+    classifier: "rule",
+  };
 }
 
 function ruleToneAndProduct(utterance: string): ClassificationResult | null {
@@ -669,8 +768,11 @@ export async function classifyUtterance(
     return { intentId: "greeting_hi", confidence: 0.92, entities: {}, classifier: "rule" };
   }
 
-  const stagedEarly = ruleStagedQualification(utterance);
-  if (stagedEarly) return stagedEarly;
+  const stagedEarly = ruleStagedQualification(utterance, options);
+  if (stagedEarly && passesListenScope(stagedEarly.intentId, options)) return stagedEarly;
+
+  const addressEarly = ruleAddressAnswer(utterance, options);
+  if (addressEarly) return addressEarly;
 
   const toneEarly = ruleToneAndProduct(utterance);
   if (toneEarly) return toneEarly;
@@ -679,6 +781,18 @@ export async function classifyUtterance(
   const examples = await prisma.intentExample.findMany();
   const rule = await ruleClassify(utterance, examples);
   let result = rule ?? (await llmClassify(utterance, intents)) ?? keywordFallback(utterance);
+
+  if (!passesListenScope(result.intentId, options)) {
+    if (SCOPED_QUALIFICATION_INTENTS.has(result.intentId)) {
+      result = {
+        ...result,
+        intentId: "unknown",
+        confidence: 0.3,
+        entities: {},
+        classifier: "rule",
+      };
+    }
+  }
 
   if (!awaiting && result.intentId === "not_interested_confirmed") {
     result = { ...result, intentId: "not_interested", confidence: result.confidence };

@@ -53,6 +53,8 @@ export interface SpeakNode extends FlowNodeBase {
   type: "speak";
   text: string;
   useLlm?: boolean;
+  /** When true, after this line the runtime returns to the main flow and repeats the saved question. */
+  returnsToMain?: boolean;
 }
 
 export interface ListenNode extends FlowNodeBase {
@@ -85,6 +87,20 @@ export interface FlowEdge {
   condition?: FlowEdgeCondition;
 }
 
+/** Intent-triggered mini-flow disconnected from the main graph; returns to main when done. */
+export interface SideFlowDef {
+  id: string;
+  intentId: string;
+  entryNodeId: string;
+  label?: string;
+}
+
+export interface MainFlowCheckpoint {
+  listenNodeId: string;
+  resumeNodeId: string;
+  lastSpokenText: string;
+}
+
 export interface FlowGraph {
   nodes: FlowNode[];
   edges: FlowEdge[];
@@ -94,6 +110,8 @@ export interface FlowGraph {
   variableBindings?: FlowVariableBinding[];
   /** When true (default), product Q&A during listen checkpoints answers and re-asks the current question. */
   interruptQa?: boolean;
+  /** Off-script flows entered by intent during a listen checkpoint; not required to connect to startNodeId. */
+  sideFlows?: SideFlowDef[];
 }
 
 export interface ClassificationResult {

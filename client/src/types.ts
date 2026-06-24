@@ -45,6 +45,7 @@ export interface FlowNode {
   label?: string;
   text?: string;
   useLlm?: boolean;
+  returnsToMain?: boolean;
   outcome?: string;
   position?: { x: number; y: number };
 }
@@ -59,6 +60,13 @@ export interface FlowEdge {
   condition?: FlowEdgeCondition;
 }
 
+export interface SideFlowDef {
+  id: string;
+  intentId: string;
+  entryNodeId: string;
+  label?: string;
+}
+
 export interface FlowGraph {
   nodes: FlowNode[];
   edges: FlowEdge[];
@@ -67,6 +75,7 @@ export interface FlowGraph {
   lookupTables?: FlowLookupTableDef[];
   variableBindings?: FlowVariableBinding[];
   interruptQa?: boolean;
+  sideFlows?: SideFlowDef[];
 }
 
 export const CONDITION_OP_LABELS: Record<ConditionOp, string> = {

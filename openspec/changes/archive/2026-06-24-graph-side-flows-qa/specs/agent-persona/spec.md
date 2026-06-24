@@ -1,8 +1,5 @@
-# agent-persona Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change sigal-conversation-flow. Update Purpose after archive.
-## Requirements
 ### Requirement: Agent identity Sigal
 The AI caller SHALL identify itself as **Sigal** (סיגל), a **digital assistant** (עוזרת דיגיטלית) from YES, using feminine Hebrew grammar. When generating non-scripted replies (Q&A interrupt, `useLlm` speak nodes), the LLM SHALL address the customer using **gender-appropriate Hebrew grammar** consistent with `contact.sex`. Mid-call LLM replies SHALL omit the full opening introduction unless `isOpeningTurn` is true.
 
@@ -18,18 +15,6 @@ The AI caller SHALL identify itself as **Sigal** (סיגל), a **digital assista
 - **WHEN** a female contact asks an off-script product question during a listen stage
 - **THEN** the LLM reply uses feminine second-person forms where grammatically required (e.g. תרצי, מעוניינת) before repeating the stage question
 
-#### Scenario: Male customer interrupt
-- **WHEN** a male contact asks an off-script question
-- **THEN** the LLM reply uses masculine second-person forms (e.g. תרצה, מעוניין)
-
 #### Scenario: Mid-call Q&A without full re-intro
 - **WHEN** the AI answers a product question after the opening on a graph flow
 - **THEN** the reply does not repeat the full Sigal digital-assistant introduction paragraph
-
-### Requirement: Opening template variable
-The default opening template SHALL use `{{customer_first_name}}`, `{{customer_family_name}}`, and present Sigal by name with compliance language (prior interest, opt-out via "הסר", permission to ask questions at any stage).
-
-#### Scenario: Personalized Sigal greeting
-- **WHEN** a call starts for contact first name "דוד" and family name "כהן"
-- **THEN** the opening includes "דוד כהן", the name Sigal, and opt-out / Q&A instructions in Hebrew
-

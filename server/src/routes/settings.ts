@@ -6,6 +6,7 @@ import {
   saveAiConfig,
   saveTelephonyConfig,
 } from "../services/settingsService.js";
+import { getOpenAiBalanceStatus } from "../services/openaiBillingService.js";
 import { productTools } from "../services/productKnowledge.js";
 
 const router = Router();
@@ -49,6 +50,14 @@ router.get("/ai", async (_req, res, next) => {
       deepgramConfigured: Boolean(config.deepgramApiKey),
       elevenLabsConfigured: Boolean(config.elevenLabsApiKey),
     });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get("/ai/balance", async (_req, res, next) => {
+  try {
+    res.json(await getOpenAiBalanceStatus());
   } catch (e) {
     next(e);
   }

@@ -123,10 +123,13 @@ export async function processStagedUtterance(
       // fall through to advance
     } else {
       const productCtx = await buildProductContext(classification.intentId, classification.entities);
+      const stageText = renderStagedText(engine, stage, contact);
       const reply = await generateSalesReply(userText, {
         customerFirstName: contact.firstName,
         customerSex: contact.sex,
-        stagePrompt: renderStagedText(engine, stage, contact),
+        stagePrompt: stageText,
+        repeatQuestion: stageText,
+        isOpeningTurn: false,
         ...productCtx,
       });
       return {
@@ -269,6 +272,8 @@ async function resolveStageSpeech(
       customerSex: contact.sex,
       stagePrompt: text,
       nodeText: text,
+      isOpeningTurn: false,
+      repeatQuestion: text,
     });
     return reply.text;
   }

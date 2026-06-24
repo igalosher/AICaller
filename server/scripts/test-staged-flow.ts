@@ -7,8 +7,8 @@ import { seedDefaultIntents } from "../src/services/intentService.js";
 
 const contact = { firstName: "דוד", familyName: "כהן" };
 
-async function classify(text: string) {
-  return classifyUtterance(text, {});
+async function classify(text: string, currentNodeId?: string) {
+  return classifyUtterance(text, { currentNodeId });
 }
 
 async function run() {
@@ -20,7 +20,12 @@ async function run() {
   console.assert(engine.currentStageId === "ask_tv_count", "advance opening -> tv count");
   console.log("✓ opening -> tv count");
 
-  r = await processStagedUtterance(engine, contact, "שתיים", await classify("שתיים"));
+  r = await processStagedUtterance(
+    engine,
+    contact,
+    "שתיים",
+    await classify("שתיים", engine.currentStageId),
+  );
   console.assert(engine.currentStageId === "ask_internet_type", "tv count -> internet");
   console.assert(!r.sayText.includes("טלוויזיות"), "internet step does not repeat TV question");
   console.assert(r.sayText.includes("תשתית"), "only internet question after TV answer");
@@ -64,6 +69,14 @@ async function run() {
   step = await processStagedUtterance(fe, contact, "בזק", await classify("בזק"));
   console.assert(step.sayText.includes("משלמת") && !step.sayText.includes("הצעה מעולה"), "price only");
   console.log("✓ sales path one question per step");
+
+  const digitOnTv = await classifyUtterance("3", { scopedAnswerIntents: ["provide_tv_count"] });
+  console.assert(digitOnTv.intentId === "provide_tv_count", "digit scoped to TV count");
+  const digitOnInet = await classifyUtterance("1", {
+    scopedAnswerIntents: ["internet_regular", "internet_fiber", "internet_unknown", "no_internet"],
+  });
+  console.assert(digitOnInet.intentId !== "provide_tv_count", "digit on internet scope is not TV count");
+  console.log("✓ scoped qualification intents");
 
   console.log("\nAll staged flow tests passed.");
   await prisma.$disconnect();

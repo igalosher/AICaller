@@ -28,6 +28,7 @@ import type {
   FlowNode,
   FlowVariableBinding,
   FlowVariableDef,
+  SideFlowDef,
 } from "../types";
 import { CONDITION_OP_LABELS, VARIABLE_TYPE_LABELS } from "../types";
 import { layoutFlowNodes } from "../flowLayout";
@@ -175,6 +176,7 @@ function reactFlowToGraph(
   lookupTables: FlowLookupTableDef[],
   variableBindings: FlowVariableBinding[],
   interruptQa: boolean,
+  sideFlows: SideFlowDef[],
 ): FlowGraph {
   const rawMap = new Map(rawNodes.map((n) => [n.id, n]));
   const flowNodes: FlowNode[] = nodes.map((n) => {
@@ -218,6 +220,7 @@ function reactFlowToGraph(
     lookupTables,
     variableBindings,
     interruptQa,
+    sideFlows: sideFlows.length > 0 ? sideFlows : undefined,
   };
 }
 
@@ -247,8 +250,14 @@ export function FlowBuilderPage() {
     graph?.variableBindings ?? [],
   );
   const [interruptQa, setInterruptQa] = useState(graph?.interruptQa !== false);
+  const [sideFlows, setSideFlows] = useState<SideFlowDef[]>(graph?.sideFlows ?? []);
   const [sidebarTab, setSidebarTab] = useState<"node" | "variables">("node");
   const [aligning, setAligning] = useState(false);
+
+  const speakNodes = useMemo(
+    () => rawNodes.filter((n) => n.type === "speak"),
+    [rawNodes],
+  );
 
   const listenNodes = useMemo(
     () => rawNodes.filter((n) => n.type === "listen"),
@@ -266,6 +275,7 @@ export function FlowBuilderPage() {
     setLookupTables(patched.lookupTables ?? []);
     setVariableBindings(patched.variableBindings ?? []);
     setInterruptQa(patched.interruptQa !== false);
+    setSideFlows(patched.sideFlows ?? []);
     setSelectedId(patched.startNodeId);
   }, [graph, setNodes, setEdges]);
 
@@ -297,10 +307,11 @@ export function FlowBuilderPage() {
         lookupTables,
         variableBindings,
         interruptQa,
+        sideFlows,
       ),
     );
     return callFlowsApi.saveGraph(flow.id, g);
-  }, [flow, nodes, edges, graph?.startNodeId, rawNodes, flowVariables, lookupTables, variableBindings, interruptQa]);
+  }, [flow, nodes, edges, graph?.startNodeId, rawNodes, flowVariables, lookupTables, variableBindings, interruptQa, sideFlows]);
 
   const applySavedGraph = useCallback(
     (g: FlowGraph, message: string) => {
@@ -313,6 +324,7 @@ export function FlowBuilderPage() {
       setLookupTables(g.lookupTables ?? []);
       setVariableBindings(g.variableBindings ?? []);
       setInterruptQa(g.interruptQa !== false);
+      setSideFlows(g.sideFlows ?? []);
       setValidationErrors([]);
       setActionError(null);
       setStatusBanner(message);
@@ -366,6 +378,7 @@ export function FlowBuilderPage() {
       setLookupTables(g.lookupTables ?? []);
       setVariableBindings(g.variableBindings ?? []);
       setInterruptQa(g.interruptQa !== false);
+      setSideFlows(g.sideFlows ?? []);
       setSelectedId(g.startNodeId);
       setValidationErrors([]);
       setPreview("");
@@ -394,11 +407,6 @@ export function FlowBuilderPage() {
       }
     },
     onError: (err) => setActionError(getErrorMessage(err, "שגיאה באימות הזרימה")),
-  });
-
-  const importMutation = useMutation({
-    mutationFn: () => callFlowsApi.importLinear(flow!.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["flowGraph"] }),
   });
 
   const addNode = (type: FlowNode["type"]) => {
@@ -432,6 +440,21 @@ export function FlowBuilderPage() {
         n.id === selectedId ? { ...n, data: { ...n.data, text } } : n,
       ),
     );
+  };
+
+  const updateSelectedReturnsToMain = (returnsToMain: boolean) => {
+    if (!selectedId) return;
+    setRawNodes((prev: FlowNode[]) =>
+      prev.map((n) => (n.id === selectedId && n.type === "speak" ? { ...n, returnsToMain } : n)),
+    );
+  };
+
+  const addSideFlow = () => {
+    const id = `sf_${Date.now()}`;
+    setSideFlows((prev) => [
+      ...prev,
+      { id, intentId: "", entryNodeId: speakNodes[0]?.id ?? "", label: "זרימת צד" },
+    ]);
   };
 
   const insertVariableIntoSpeak = (varName: string) => {
@@ -583,9 +606,6 @@ export function FlowBuilderPage() {
               + {NODE_LABELS[t]}
             </button>
           ))}
-          <button className="rounded border px-3 py-1 text-sm" onClick={() => importMutation.mutate()}>
-            ייבוא מלינארי
-          </button>
           <button className="rounded border px-3 py-1 text-sm" onClick={() => validateMutation.mutate()}>
             אימות
           </button>
@@ -732,6 +752,79 @@ export function FlowBuilderPage() {
                   </span>
                 </span>
               </label>
+
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h3 className="font-semibold">זרימות צד (לפי כוונה)</h3>
+                  <button type="button" className="rounded border px-2 py-0.5 text-xs" onClick={addSideFlow}>
+                    + זרימה
+                  </button>
+                </div>
+                <p className="mb-2 text-xs text-slate-600">
+                  בכל שלב שאלה — כוונה שלא מנותבת בזרימה הראשית מפעילה שרשרת דיבור נפרדת. בסיום
+                  (סימון &quot;חזרה לזרימה הראשית&quot; בצומת דיבור) נחזור ונשאל שוב את השאלה
+                  האחרונה.
+                </p>
+                {sideFlows.length === 0 && (
+                  <p className="text-xs text-slate-500">אין זרימות צד — לדוגמה שיחת חולין (small_talk)</p>
+                )}
+                {sideFlows.map((sf, idx) => (
+                  <div key={sf.id} className="mb-2 space-y-1 rounded border p-2">
+                    <input
+                      className="w-full rounded border px-2 py-1"
+                      value={sf.label ?? ""}
+                      onChange={(e) => {
+                        const label = e.target.value;
+                        setSideFlows((prev) =>
+                          prev.map((item, i) => (i === idx ? { ...item, label } : item)),
+                        );
+                      }}
+                      placeholder="תווית"
+                    />
+                    <select
+                      className="w-full rounded border px-2 py-1"
+                      value={sf.intentId}
+                      onChange={(e) => {
+                        const intentId = e.target.value;
+                        setSideFlows((prev) =>
+                          prev.map((item, i) => (i === idx ? { ...item, intentId } : item)),
+                        );
+                      }}
+                    >
+                      <option value="">בחר כוונה</option>
+                      {(intents ?? []).map((intent) => (
+                        <option key={intent.id} value={intent.id}>
+                          {intent.labelHe} ({intent.id})
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      className="w-full rounded border px-2 py-1"
+                      value={sf.entryNodeId}
+                      onChange={(e) => {
+                        const entryNodeId = e.target.value;
+                        setSideFlows((prev) =>
+                          prev.map((item, i) => (i === idx ? { ...item, entryNodeId } : item)),
+                        );
+                      }}
+                    >
+                      <option value="">צומת כניסה (דיבור)</option>
+                      {speakNodes.map((n) => (
+                        <option key={n.id} value={n.id}>
+                          {n.label ?? n.id}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="text-xs text-red-600"
+                      onClick={() => setSideFlows((prev) => prev.filter((_, i) => i !== idx))}
+                    >
+                      מחק
+                    </button>
+                  </div>
+                ))}
+              </div>
 
               <div>
                 <div className="mb-2 flex items-center justify-between">
@@ -959,6 +1052,19 @@ export function FlowBuilderPage() {
                   ))}
                 </div>
               )}
+              <label className="mt-2 flex items-center gap-2 rounded border p-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={Boolean(selectedNode.returnsToMain)}
+                  onChange={(e) => updateSelectedReturnsToMain(e.target.checked)}
+                />
+                <span>
+                  <span className="font-medium">חזרה לזרימה הראשית</span>
+                  <span className="block text-xs text-slate-600">
+                    לאחר דיבור זה — חזור לשאלה האחרונה בזרימה הראשית (לזרימות צד)
+                  </span>
+                </span>
+              </label>
               <button className="rounded border px-3 py-1 text-sm" onClick={() => previewMutation.mutate()}>
                 תצוגה מקדימה
               </button>

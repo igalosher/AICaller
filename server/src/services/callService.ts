@@ -39,13 +39,20 @@ import { logger } from "../logger.js";
 import { createEngineFromGraph, GraphFlowEngine } from "../flow/graphFlowEngine.js";
 import {
   getListenCheckpoint,
+  getListenScopedIntentIds,
   initGraphContext,
-  isInterruptQaEnabled,
   parseGraphContext,
+  resolveListenIdFromPosition,
   serializeGraphContext,
+  isMainPathAnswer,
   shouldInterruptQa,
   speakNodeForListen,
 } from "../flow/graphFlowRuntime.js";
+import {
+  collectSideFlowSpeakNodes,
+  isInSideFlow,
+  shouldEnterSideFlow,
+} from "../flow/sideFlowRuntime.js";
 import { applyListenBindings, flowVariablesForTemplate } from "../flow/variableBinding.js";
 import { mergeTemplateVars, resolveTemplate } from "../utils/template.js";
 import { lookupFiberAvailability } from "./fiberLookup.js";
@@ -62,11 +69,13 @@ import {
   classifyUtterance,
   getIntentThresholds,
   persistClassification,
+  type ClassifyOptions,
 } from "./intentService.js";
 import { describeChannel } from "./catalogChannelLookup.js";
 import { productTools } from "./productKnowledge.js";
 import { SOLD_GOODBYE } from "../flow/starterFlow.js";
 import type { SpeakNode } from "../flow/graphTypes.js";
+import type { StagedFlowDefinition, StagedStage } from "../flow/stagedFlowTypes.js";
 import type { CallOutcome, CallStatus, CallFlow, Contact } from "@prisma/client";
 
 export type VoiceTurnResult = { sayText: string; endCall: boolean };
@@ -186,6 +195,167 @@ async function buildProductContext(
   return { channelContext, packetContext };
 }
 
+function findStagedStage(
+  def: StagedFlowDefinition,
+  stageId: string,
+  subflowId: string | null,
+): StagedStage | undefined {
+  if (subflowId) {
+    return def.subflows[subflowId]?.stages.find((s) => s.id === stageId);
+  }
+  return def.stages.find((s) => s.id === stageId);
+}
+
+function classifyOptionsForCall(
+  call: {
+    currentNodeId: string | null;
+    currentStage: string | null;
+    currentSubflowId: string | null;
+    callFlow: {
+      stagesJson: string;
+      publishedGraphJson: string;
+      draftGraphJson: string;
+    };
+  },
+  session?: SessionEngine,
+): ClassifyOptions {
+  const options: ClassifyOptions = {
+    currentNodeId: call.currentNodeId ?? undefined,
+    awaitingRefusalConfirm:
+      call.currentNodeId === "listen_confirm" || call.currentNodeId === "route_confirm",
+  };
+  const graph = getPublishedGraphForCall(call.callFlow);
+  if (graph) {
+    let listenId =
+      session?.mode === "graph"
+        ? getListenCheckpoint(session.engine)
+        : null;
+    if (!listenId) {
+      listenId = resolveListenIdFromPosition(graph, call.currentNodeId);
+    }
+    if (listenId) {
+      options.scopedAnswerIntents = getListenScopedIntentIds(graph, listenId);
+    }
+  } else {
+    const staged = parseStagedFlow(call.callFlow.stagesJson);
+    if (staged && call.currentStage) {
+      const stage = findStagedStage(staged, call.currentStage, call.currentSubflowId);
+      if (stage?.advanceOn?.length && (stage.waitForAnswer || stage.listen)) {
+        options.scopedAnswerIntents = stage.advanceOn;
+      }
+    }
+  }
+  return options;
+}
+
+function resolveSpeakPrompt(
+  speakNode: SpeakNode | undefined,
+  contact: ContactForSpeech,
+  variables: Record<string, unknown>,
+): string {
+  if (!speakNode?.text) return "";
+  return resolveTemplate(
+    speakNode.text,
+    mergeTemplateVars(
+      templateVars(contact.firstName, contact.familyName, contact.sex),
+      flowVariablesForTemplate(variables),
+    ),
+  );
+}
+
+async function persistGraphTurn(
+  callId: string,
+  engine: GraphFlowEngine,
+  ctx: ReturnType<typeof parseGraphContext>,
+  sayText: string,
+): Promise<void> {
+  await prisma.call.update({
+    where: { id: callId },
+    data: {
+      currentNodeId: engine.currentNodeId,
+      currentStage: engine.currentNodeId,
+      contextJson: serializeGraphContext(ctx),
+    },
+  });
+  await addTranscript(callId, "ai", sayText);
+  broadcastCallEvent({ type: "transcript", callId, speaker: "ai", text: sayText });
+}
+
+async function runSideFlowEntry(
+  callId: string,
+  call: CallWithRelations,
+  engine: GraphFlowEngine,
+  listenId: string,
+  sideFlow: { entryNodeId: string },
+  ctx: ReturnType<typeof parseGraphContext>,
+  classification: Awaited<ReturnType<typeof classifyUtterance>>,
+  text: string,
+): Promise<VoiceTurnResult> {
+  const graph = engine.getGraph();
+  const speakNode = speakNodeForListen(engine, listenId);
+  const stagePrompt =
+    resolveSpeakPrompt(speakNode, call.contact, ctx.variables ?? {}) ||
+    ctx.lastSpokenText ||
+    "";
+
+  ctx.mainCheckpoint = {
+    listenNodeId: listenId,
+    resumeNodeId: listenId,
+    lastSpokenText: stagePrompt,
+  };
+
+  const speaks = collectSideFlowSpeakNodes(graph, sideFlow.entryNodeId);
+  const spokenParts: string[] = [];
+  for (let i = 0; i < speaks.length; i++) {
+    const sn = speaks[i]!;
+    const part = await speakFromNode(
+      sn,
+      call.contact,
+      sn.useLlm && i === 0 ? text : undefined,
+      sn.useLlm && i === 0 ? classification.entities : undefined,
+      sn.useLlm && i === 0 ? classification.intentId : undefined,
+      ctx.variables,
+    );
+    spokenParts.push(part);
+  }
+
+  const lastSpeak = speaks[speaks.length - 1];
+  let sayText = spokenParts.join(" ");
+
+  if (lastSpeak?.returnsToMain && ctx.mainCheckpoint) {
+    engine.currentNodeId = ctx.mainCheckpoint.resumeNodeId;
+    const repeat = ctx.mainCheckpoint.lastSpokenText;
+    sayText = `${sayText} ${repeat}`.trim();
+    ctx.lastSpokenText = repeat;
+    delete ctx.mainCheckpoint;
+  } else if (lastSpeak) {
+    engine.currentNodeId = lastSpeak.id;
+    const edge = engine.getNextAutoEdge(lastSpeak.id);
+    if (edge) {
+      const next = graph.nodes.find((n) => n.id === edge.target);
+      if (next) engine.currentNodeId = next.id;
+    }
+    ctx.lastSpokenText = spokenParts[spokenParts.length - 1]!;
+  }
+
+  await persistGraphTurn(callId, engine, ctx, sayText);
+  return { sayText, endCall: false };
+}
+
+function restoreMainAfterSideFlow(
+  engine: GraphFlowEngine,
+  ctx: ReturnType<typeof parseGraphContext>,
+  spokenParts: string[],
+): string | undefined {
+  if (!ctx.mainCheckpoint) return undefined;
+  engine.currentNodeId = ctx.mainCheckpoint.resumeNodeId;
+  const repeat = ctx.mainCheckpoint.lastSpokenText;
+  delete ctx.mainCheckpoint;
+  const sayText = [...spokenParts, repeat].join(" ").trim();
+  ctx.lastSpokenText = repeat;
+  return sayText;
+}
+
 async function speakFromNode(
   node: SpeakNode,
   contact: ContactForSpeech,
@@ -200,15 +370,17 @@ async function speakFromNode(
   );
   let text = resolveTemplate(node.text, vars);
 
-  if (node.useLlm || userMessage) {
+  if (node.useLlm) {
     const productCtx = await buildProductContext(intentId ?? "", entities);
+    const isOpening = !userMessage && /opening/i.test(node.id);
     const reply = await generateSalesReply(userMessage ?? text, {
       customerFirstName: contact.firstName,
       customerSex: contact.sex,
       stagePrompt: text,
       nodeText: text,
       ...productCtx,
-      isOpeningTurn: !userMessage,
+      isOpeningTurn: isOpening,
+      repeatQuestion: userMessage ? text : undefined,
     });
     return reply.text;
   }
@@ -665,33 +837,6 @@ export async function processCustomerTurn(callId: string, text: string): Promise
 
   clearStagedSilence(callId);
 
-  const isSilence = text.trim() === "";
-  const classification = isSilence
-    ? {
-        intentId: "silence",
-        confidence: 1,
-        entities: {},
-        classifier: "rule" as const,
-      }
-    : await classifyUtterance(text, {
-        currentNodeId: call.currentNodeId ?? undefined,
-        awaitingRefusalConfirm:
-          call.currentNodeId === "listen_confirm" || call.currentNodeId === "route_confirm",
-      });
-
-  if (!isSilence) {
-    const segment = await addTranscript(callId, "customer", text);
-    broadcastCallEvent({ type: "transcript", callId, speaker: "customer", text });
-    await persistClassification(segment.id, callId, classification);
-    broadcastCallEvent({
-      type: "classification",
-      callId,
-      segmentId: segment.id,
-      intentId: classification.intentId,
-      confidence: classification.confidence,
-    });
-  }
-
   let session = activeSessions.get(callId);
   if (!session) {
     const sessionEngine = createSessionEngine(call.callFlow);
@@ -712,6 +857,40 @@ export async function processCustomerTurn(callId: string, text: string): Promise
     }
     session = { session: sessionEngine };
     activeSessions.set(callId, session);
+  }
+
+  const isSilence = text.trim() === "";
+  const classification = isSilence
+    ? {
+        intentId: "silence",
+        confidence: 1,
+        entities: {},
+        classifier: "rule" as const,
+      }
+    : await classifyUtterance(
+        text,
+        classifyOptionsForCall(
+          {
+            currentNodeId: call.currentNodeId,
+            currentStage: call.currentStage,
+            currentSubflowId: call.currentSubflowId,
+            callFlow: call.callFlow,
+          },
+          session.session,
+        ),
+      );
+
+  if (!isSilence) {
+    const segment = await addTranscript(callId, "customer", text);
+    broadcastCallEvent({ type: "transcript", callId, speaker: "customer", text });
+    await persistClassification(segment.id, callId, classification);
+    broadcastCallEvent({
+      type: "classification",
+      callId,
+      segmentId: segment.id,
+      intentId: classification.intentId,
+      confidence: classification.confidence,
+    });
   }
 
   if (session.session.mode === "staged") {
@@ -816,9 +995,28 @@ async function processGraphTurn(
 
   const graph = engine.getGraph();
   const listenId = getListenCheckpoint(engine);
+  const inSideFlow = isInSideFlow(ctx, engine);
+
+  if (!inSideFlow && listenId && text.trim()) {
+    const sideFlow = shouldEnterSideFlow(graph, listenId, classification, thresholds);
+    if (sideFlow) {
+      return runSideFlowEntry(
+        callId,
+        call,
+        engine,
+        listenId,
+        sideFlow,
+        ctx,
+        classification,
+        text,
+      );
+    }
+  }
+
   if (
     listenId &&
     text.trim() &&
+    !isMainPathAnswer(graph, listenId, classification, thresholds) &&
     shouldInterruptQa(graph, listenId, classification, thresholds)
   ) {
     const speakNode = speakNodeForListen(engine, listenId);
@@ -838,10 +1036,15 @@ async function processGraphTurn(
       customerFirstName: call.contact.firstName,
       customerSex: call.contact.sex,
       stagePrompt,
+      repeatQuestion: stagePrompt,
+      isOpeningTurn: false,
       ...productCtx,
     });
     const answer = reply.text.trim() || (classification.intentId === "greeting_hi" ? "היי!" : "בטח, אשמח לעזור.");
-    const sayText = stagePrompt ? `${answer} ${stagePrompt}`.trim() : answer;
+    const sayText =
+      stagePrompt && answer !== stagePrompt
+        ? `${answer} ${stagePrompt}`.trim()
+        : answer || stagePrompt;
     if (stagePrompt) ctx.lastSpokenText = stagePrompt;
     await prisma.call.update({
       where: { id: callId },
@@ -895,12 +1098,16 @@ async function processGraphTurn(
     const part = await speakFromNode(
       node,
       call.contact,
-      spokenParts.length === 0 ? text : undefined,
-      spokenParts.length === 0 ? classification.entities : undefined,
-      spokenParts.length === 0 ? classification.intentId : undefined,
+      node.useLlm && spokenParts.length === 0 ? text : undefined,
+      node.useLlm && spokenParts.length === 0 ? classification.entities : undefined,
+      node.useLlm && spokenParts.length === 0 ? classification.intentId : undefined,
       ctx.variables,
     );
     spokenParts.push(part);
+    if (node.returnsToMain && ctx.mainCheckpoint) {
+      sayText = restoreMainAfterSideFlow(engine, ctx, spokenParts) ?? spokenParts.join(" ");
+      break;
+    }
     const edge = engine.getNextAutoEdge(node.id);
     if (!edge) {
       node = undefined;

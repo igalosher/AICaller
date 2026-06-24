@@ -1,5 +1,6 @@
 import type { FlowGraph, FlowVariableDef, FlowVariableType } from "./graphTypes.js";
 import { listLookupColumns, parseLookupRows, validateLookupTableSize } from "./lookupQuery.js";
+import { collectSideFlowSpeakNodes } from "./sideFlowRuntime.js";
 
 export interface ValidationError {
   messageHe: string;
@@ -165,6 +166,43 @@ export function validateFlowGraph(graph: FlowGraph): ValidationError[] {
     }
   }
 
+  for (const edge of graph.edges) {
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) {
+      errors.push({ messageHe: `קשת ${edge.id} מצביעה על צומת לא קיים` });
+    }
+  }
+
+  for (const sf of graph.sideFlows ?? []) {
+    if (!nodeIds.has(sf.entryNodeId)) {
+      errors.push({ messageHe: `זרימת צד "${sf.label ?? sf.id}": צומת כניסה לא קיים` });
+      continue;
+    }
+    const entry = graph.nodes.find((n) => n.id === sf.entryNodeId);
+    if (entry?.type !== "speak") {
+      errors.push({ messageHe: `זרימת צד "${sf.label ?? sf.id}": כניסה חייבת להיות צומת דיבור` });
+    }
+    const speaks = collectSideFlowSpeakNodes(graph, sf.entryNodeId);
+    if (speaks.length === 0) {
+      errors.push({ messageHe: `זרימת צד "${sf.label ?? sf.id}": אין צמתי דיבור בשרשרת` });
+    } else if (!speaks[speaks.length - 1]?.returnsToMain) {
+      const lastId = speaks[speaks.length - 1]!.id;
+      const nextEdge = graph.edges.find((e) => e.source === lastId);
+      const nextNode = nextEdge && graph.nodes.find((n) => n.id === nextEdge.target);
+      if (!nextNode || nextNode.type !== "listen") {
+        errors.push({
+          messageHe: `זרימת צד "${sf.label ?? sf.id}": סמן "חזרה לזרימה הראשית" בצומת האחרון`,
+        });
+      }
+    }
+  }
+
+  const exemptFromReachability = new Set<string>();
+  for (const sf of graph.sideFlows ?? []) {
+    for (const speak of collectSideFlowSpeakNodes(graph, sf.entryNodeId)) {
+      exemptFromReachability.add(speak.id);
+    }
+  }
+
   if (graph.startNodeId) {
     const reachable = new Set<string>();
     const queue = [graph.startNodeId];
@@ -176,7 +214,9 @@ export function validateFlowGraph(graph: FlowGraph): ValidationError[] {
         queue.push(e.target);
       }
     }
-    const unreachable = graph.nodes.filter((n) => !reachable.has(n.id));
+    const unreachable = graph.nodes.filter(
+      (n) => !reachable.has(n.id) && !exemptFromReachability.has(n.id),
+    );
     for (const n of unreachable) {
       if (n.id !== graph.startNodeId) {
         errors.push({ nodeId: n.id, messageHe: `צומת ${n.label ?? n.id} לא נגיש מההתחלה` });
@@ -185,12 +225,6 @@ export function validateFlowGraph(graph: FlowGraph): ValidationError[] {
     const canReachEnd = endNodes.some((n) => reachable.has(n.id));
     if (!canReachEnd) {
       errors.push({ messageHe: "אין נתיב מההתחלה לצומת סיום" });
-    }
-  }
-
-  for (const edge of graph.edges) {
-    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) {
-      errors.push({ messageHe: `קשת ${edge.id} מצביעה על צומת לא קיים` });
     }
   }
 

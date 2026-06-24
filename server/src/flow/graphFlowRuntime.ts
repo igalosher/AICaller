@@ -1,10 +1,26 @@
 import type { GraphFlowEngine } from "./graphFlowEngine.js";
-import type { FlowGraph, SpeakNode } from "./graphTypes.js";
+import type {
+  FlowGraph,
+  FlowVariableBinding,
+  SideFlowDef,
+  SpeakNode,
+} from "./graphTypes.js";
 import { initSessionVariables } from "./variableBinding.js";
 
 export type GraphCallContext = {
   lastSpokenText?: string;
   variables?: Record<string, unknown>;
+  mainCheckpoint?: import("./graphTypes.js").MainFlowCheckpoint;
+};
+
+const ENTITY_PATH_TO_INTENT: Record<string, string> = {
+  tv_count: "provide_tv_count",
+  address: "provide_address",
+  monthly_price: "provide_current_price",
+};
+
+const VARIABLE_TO_INTENT: Record<string, string> = {
+  NumOfTVs: "provide_tv_count",
 };
 
 const PRODUCT_QA_INTENTS = new Set([
@@ -23,6 +39,7 @@ export function parseGraphContext(json: string): GraphCallContext {
     return {
       lastSpokenText: parsed.lastSpokenText,
       variables: parsed.variables ?? {},
+      mainCheckpoint: parsed.mainCheckpoint,
     };
   } catch {
     return { variables: {} };
@@ -65,6 +82,79 @@ export function classificationMatchesExplicitRoute(
   return false;
 }
 
+export function findSideFlow(graph: FlowGraph, intentId: string): SideFlowDef | undefined {
+  return graph.sideFlows?.find((sf) => sf.intentId === intentId);
+}
+
+function intentIdFromBinding(binding: FlowVariableBinding): string | undefined {
+  if (binding.source === "intent") {
+    return typeof binding.path === "string" ? binding.path : undefined;
+  }
+  if (binding.source === "entity") {
+    if (binding.path && ENTITY_PATH_TO_INTENT[binding.path]) {
+      return ENTITY_PATH_TO_INTENT[binding.path];
+    }
+    if (binding.variableName && VARIABLE_TO_INTENT[binding.variableName]) {
+      return VARIABLE_TO_INTENT[binding.variableName];
+    }
+  }
+  if (binding.source === "raw_text") {
+    return "provide_address";
+  }
+  return undefined;
+}
+
+/** Intents that count as a direct answer on this listen (route edges + variable bindings). */
+export function getListenScopedIntentIds(graph: FlowGraph, listenNodeId: string): string[] {
+  const intents = new Set<string>();
+  const routeId = listenNodeId.replace(/^listen_/, "route_");
+  for (const edge of graph.edges) {
+    if (edge.source === routeId && edge.intentId && !edge.isDefault) {
+      intents.add(edge.intentId);
+    }
+  }
+  for (const binding of graph.variableBindings ?? []) {
+    if (binding.listenNodeId !== listenNodeId) continue;
+    const fromBinding = intentIdFromBinding(binding);
+    if (fromBinding) intents.add(fromBinding);
+  }
+  return [...intents];
+}
+
+export function isMainPathAnswer(
+  graph: FlowGraph,
+  listenNodeId: string,
+  classification: { intentId: string; confidence: number },
+  thresholds: Record<string, number>,
+): boolean {
+  if (classification.intentId === "silence" || classification.intentId === "opt_out_remove") {
+    return true;
+  }
+  const routeId = listenNodeId.replace(/^listen_/, "route_");
+  if (!graph.nodes.some((n) => n.id === routeId)) return false;
+  if (classificationMatchesExplicitRoute(graph, routeId, classification, thresholds)) {
+    return true;
+  }
+  const scoped = getListenScopedIntentIds(graph, listenNodeId);
+  const threshold = thresholds[classification.intentId] ?? 0.7;
+  return scoped.includes(classification.intentId) && classification.confidence >= threshold;
+}
+
+/** Resolve the listen checkpoint id from engine position (listen, or route/decision after listen). */
+export function resolveListenIdFromPosition(
+  graph: FlowGraph,
+  currentNodeId: string | null | undefined,
+): string | null {
+  if (!currentNodeId) return null;
+  const node = graph.nodes.find((n) => n.id === currentNodeId);
+  if (node?.type === "listen") return node.id;
+  if (node?.type === "intent_route" || node?.type === "decision") {
+    const edge = graph.edges.find((e) => e.target === currentNodeId);
+    if (edge?.source.startsWith("listen_")) return edge.source;
+  }
+  return null;
+}
+
 /** Customer asked something off-script — answer via LLM and repeat the current stage question. */
 export function shouldInterruptQa(
   graph: FlowGraph,
@@ -76,7 +166,13 @@ export function shouldInterruptQa(
   if (classification.intentId === "didnt_understand") return false;
   const routeId = listenId.replace(/^listen_/, "route_");
   if (!graph.nodes.some((n) => n.id === routeId)) return false;
-  return !classificationMatchesExplicitRoute(graph, routeId, classification, thresholds);
+  const sideFlow = findSideFlow(graph, classification.intentId);
+  if (sideFlow) {
+    const threshold = thresholds[classification.intentId] ?? 0.7;
+    if (classification.confidence >= threshold) return false;
+  }
+  if (isMainPathAnswer(graph, listenId, classification, thresholds)) return false;
+  return true;
 }
 
 export function getListenCheckpoint(engine: GraphFlowEngine): string | null {
@@ -99,11 +195,11 @@ export function speakNodeForListen(
   const byConvention = graph.nodes.find(
     (n) => n.id === listenId.replace(/^listen_/, "speak_") && n.type === "speak",
   );
-  if (byConvention) return byConvention;
+  if (byConvention?.type === "speak") return byConvention;
 
   for (const edge of graph.edges.filter((e) => e.target === listenId)) {
     const node = graph.nodes.find((n) => n.id === edge.source);
-    if (node?.type === "speak") return node;
+    if (node?.type === "speak") return node as SpeakNode;
   }
 
   return undefined;

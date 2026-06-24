@@ -7,9 +7,7 @@ import {
   SIGAL_QUALIFY,
   SOLD_GOODBYE,
 } from "../flow/starterFlow.js";
-import { linearFlowToGraph } from "../flow/linearToGraph.js";
 import { normalizeFlowGraph } from "../flow/graphFlowEngine.js";
-import { parseCallFlow } from "./callFlowService.js";
 import type { FlowGraph } from "../flow/graphTypes.js";
 
 export async function getActiveFlowGraph(): Promise<FlowGraph | null> {
@@ -49,19 +47,22 @@ export async function getDraftGraph(flowId: string): Promise<FlowGraph> {
 export async function saveDraftGraph(flowId: string, graph: FlowGraph) {
   const flow = await prisma.callFlow.findUnique({ where: { id: flowId } });
   if (!flow) throw new AppError(404, "זרימת שיחה לא נמצאה");
-  return prisma.callFlow.update({
+  const enhanced = enhanceSigalGraph(normalizeFlowGraph(graph));
+  await prisma.callFlow.update({
     where: { id: flowId },
-    data: { draftGraphJson: JSON.stringify(graph) },
+    data: { draftGraphJson: JSON.stringify(enhanced) },
   });
+  return enhanced;
 }
 
 export async function publishFlowGraph(flowId: string) {
   const flow = await prisma.callFlow.findUnique({ where: { id: flowId } });
   if (!flow) throw new AppError(404, "זרימת שיחה לא נמצאה");
 
-  const graph = JSON.parse(
+  const raw = JSON.parse(
     flow.draftGraphJson !== "{}" ? flow.draftGraphJson : flow.publishedGraphJson,
   ) as FlowGraph;
+  const graph = enhanceSigalGraph(normalizeFlowGraph(raw));
   const errors = validateFlowGraph(graph);
   if (errors.length > 0) {
     throw new AppError(400, errors.map((e) => e.messageHe).join("; "));
@@ -82,14 +83,6 @@ export async function publishFlowGraph(flowId: string) {
       isActive: true,
     },
   });
-}
-
-export async function importLinearToGraph(flowId: string) {
-  const flow = await prisma.callFlow.findUnique({ where: { id: flowId } });
-  if (!flow) throw new AppError(404, "זרימת שיחה לא נמצאה");
-  const parsed = parseCallFlow(flow);
-  const graph = linearFlowToGraph(parsed);
-  return saveDraftGraph(flowId, graph);
 }
 
 const QA_REPLY_IDS = [

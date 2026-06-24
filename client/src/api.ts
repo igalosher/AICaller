@@ -68,8 +68,6 @@ export const callFlowsApi = {
   publish: (id: string) => api.post<CallFlow>(`/call-flows/${id}/publish`).then((r) => r.data),
   validate: (id: string) =>
     api.post<{ errors: { messageHe: string }[] }>(`/call-flows/${id}/validate`).then((r) => r.data),
-  importLinear: (id: string) =>
-    api.post<import("./types").FlowGraph>(`/call-flows/${id}/import-linear`).then((r) => r.data),
 };
 
 export const intentsApi = {
@@ -102,6 +100,18 @@ export const settingsApi = {
     api.put("/settings/telephony", data).then((r) => r.data),
   testTelephony: () => api.post<{ ok: boolean; message: string }>("/settings/telephony/test").then((r) => r.data),
   ai: () => api.get("/settings/ai").then((r) => r.data),
+  openAiBalance: () =>
+    api
+      .get<{
+        configured: boolean;
+        balanceUsd: number | null;
+        totalGrantedUsd: number | null;
+        totalUsedUsd: number | null;
+        available: boolean;
+        messageHe: string;
+        dashboardUrl: string;
+      }>("/settings/ai/balance")
+      .then((r) => r.data),
   saveAi: (data: Record<string, unknown>) => api.put("/settings/ai", data).then((r) => r.data),
 };
 

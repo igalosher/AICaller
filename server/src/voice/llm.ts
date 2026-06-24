@@ -15,7 +15,10 @@ export interface SalesReplyContext {
   customerFirstName: string;
   customerSex?: ContactSex;
   stagePrompt: string;
+  /** True only for the first opening speak node — enables self-introduction. */
   isOpeningTurn?: boolean;
+  /** Question to re-ask after a mid-call Q&A answer (not read as script to paraphrase). */
+  repeatQuestion?: string;
   channelContext?: string;
   packetContext?: string;
   internetContext?: string;
@@ -24,15 +27,38 @@ export interface SalesReplyContext {
   nodeText?: string;
 }
 
-const SYSTEM_PROMPT = `את סיגל, עוזרת דיגיטלית של YES (טלוויזיה, טלפון ואינטרנט בישראל).
+const SYSTEM_PROMPT_OPENING = `את סיגל, עוזרת דיגיטלית של YES (טלוויזיה, טלפון ואינטרנט בישראל).
 דברי בעברית טבעית, חמה ומקצועית, בגובה העיניים.
-בפתיחת שיחה הציגי את עצמך כעוזרת דיגיטלית מ-YES, עם אזכור הצעה ומתנה למצטרפים.
-עני על שאלות לפי מידע מדויק מהקטלוג והחבילות בלבד — ערוצים, חבילות, אינטרנט, שכירות נתב ואפשרויות.
-בשיחת חולין (איך את, מה שלומך) — עני בחמימות בלי לדחוף מכירה מיד.
-אם הלקוח מקלל או מעליב — אמרי בעדינות שזה לא מכבד ולא נעים לשמוע, והמשיכי בכבוד.
-אם הלקוח אומר "הסר" — סיימי בנימוס מיד.
-כשהלקוח מביע עניין לסגור — אמרי שנציג אנושי יחזור אליו לתיאום התקנה, תודה ויום טוב, וסיימי.
+בפתיחת שיחה בלבד — הציגי את עצמך פעם אחת כעוזרת דיגיטלית מ-YES, עם אזכור הצעה ומתנה למצטרפים.
+עני על שאלות לפי מידע מדויק מהקטלוג והחבילות בלבד.
 אל תחזרי על שם הלקוח בכל משפט.`;
+
+const SYSTEM_PROMPT_MID_CALL = `את סיגל מ-YES בשיחת מכירה שכבר התחילה.
+דברי בעברית טבעית, קצרה וממוקדת.
+חשוב: אל תציגי את עצמך שוב. אל תאמרי "שלום", "אני סיגל", "העוזרת הדיגיטלית" או כל הצגה מחדש.
+עני רק על מה שהלקוח שאל — ערוץ, חבילה, מחיר, אינטרנט, נתב או אפשרויות — לפי הקטלוג.
+בשיחת חולין — עני בחמימות בלי לדחוף מכירה.
+אם הלקוח מקלל — עני בעדינות ובכבוד.
+אם הלקוח אומר "הסר" — סיימי בנימוס.
+אל תחזרי על שם הלקוח בכל משפט.`;
+
+const INTRO_PATTERNS = [
+  /^שלום[,!\s]*/i,
+  /אני סיגל[^.]*\.?\s*/g,
+  /כאן סיגל[^.]*\.?\s*/g,
+  /העוזרת הדיגיטלית[^.]*\.?\s*/g,
+  /עוזרת דיגיטלית מ?-?YES[^.]*\.?\s*/gi,
+  /מחברת YES[^.]*\.?\s*/g,
+];
+
+function stripRepeatedIntroduction(text: string): string {
+  let out = text.trim();
+  for (const pattern of INTRO_PATTERNS) {
+    out = out.replace(pattern, "").trim();
+  }
+  out = out.replace(/^[,.!\s]+/, "").trim();
+  return out || text.trim();
+}
 
 export async function generateSalesReply(
   userMessage: string,
@@ -61,6 +87,20 @@ export async function generateSalesReply(
     .join(". ");
 
   if (config.openaiApiKey) {
+    const opening = context.isOpeningTurn === true;
+    const systemPrompt = opening ? SYSTEM_PROMPT_OPENING : SYSTEM_PROMPT_MID_CALL;
+    const contextLine = opening
+      ? `שם פרטי (להקשר בלבד): ${context.customerFirstName}. ${genderPromptHint(context.customerSex ?? "male")} טקסט הפתיחה: ${context.stagePrompt}. ${productContext}`
+      : [
+          `שם פרטי (להקשר בלבד): ${context.customerFirstName}.`,
+          genderPromptHint(context.customerSex ?? "male"),
+          context.repeatQuestion ? `לאחר מענה — הלקוח ישמע שוב את השאלה: "${context.repeatQuestion}"` : "",
+          productContext,
+          context.nodeText ? `הנחיית צומת (לא לקרוא כלשון): ${context.nodeText}` : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+
     return timed("llm_round_trip", undefined, async () => {
       const res = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -71,19 +111,16 @@ export async function generateSalesReply(
         body: JSON.stringify({
           model: "gpt-4o-mini",
           messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            {
-              role: "system",
-              content: `שם פרטי (להקשר בלבד): ${context.customerFirstName}. ${genderPromptHint(context.customerSex ?? "male")} שלב נוכחי: ${context.stagePrompt}. ${productContext}${context.nodeText ? `. הנחיית צומת: ${context.nodeText}` : ""}`,
-            },
+            { role: "system", content: systemPrompt },
+            { role: "system", content: contextLine },
             {
               role: "user",
-              content: context.isOpeningTurn
-                ? `המשיכי את השיחה לפי שלב: ${context.stagePrompt}`
+              content: opening
+                ? `הקריאי את פתיחת השיחה לפי הטקסט. הציגי את עצמך פעם אחת בלבד: ${context.stagePrompt}`
                 : userMessage,
             },
           ],
-          temperature: 0.4,
+          temperature: opening ? 0.4 : 0.3,
         }),
       });
       if (!res.ok) {
@@ -97,7 +134,10 @@ export async function generateSalesReply(
       const data = (await res.json()) as {
         choices: { message: { content: string } }[];
       };
-      const text = data.choices[0]?.message?.content ?? fallbackReply(userMessage, context).text;
+      let text = data.choices[0]?.message?.content ?? fallbackReply(userMessage, context).text;
+      if (!opening) {
+        text = stripRepeatedIntroduction(text);
+      }
       return { text, outcome: detectOutcome(userMessage) };
     });
   }
@@ -130,9 +170,10 @@ function fallbackReply(userMessage: string, context: SalesReplyContext): LlmResp
   if (lower.includes("לא מעוניין") || lower.includes("לא רוצה")) {
     return { text: "הבנתי. רק לוודא — האם אתה בטוח שאתה לא מעוניין?" };
   }
-  return {
-    text: context.stagePrompt || "אשמח לעזור. אפשר לחזור על השאלה?",
-  };
+  if (context.isOpeningTurn) {
+    return { text: context.stagePrompt || "אשמח לעזור. אפשר לחזור על השאלה?" };
+  }
+  return { text: "אשמח לעזור. אפשר לחזור על השאלה?" };
 }
 
 function matchesInsult(text: string): boolean {

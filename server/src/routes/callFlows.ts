@@ -8,7 +8,6 @@ import {
 } from "../services/callFlowService.js";
 import {
   getDraftGraph,
-  importLinearToGraph,
   publishFlowGraph,
   saveDraftGraph,
 } from "../services/flowGraphService.js";
@@ -62,6 +61,16 @@ const graphSchema = z.object({
     )
     .optional(),
   interruptQa: z.boolean().optional(),
+  sideFlows: z
+    .array(
+      z.object({
+        id: z.string(),
+        intentId: z.string(),
+        entryNodeId: z.string(),
+        label: z.string().optional(),
+      }),
+    )
+    .optional(),
 });
 
 router.get("/", async (_req, res, next) => {
@@ -113,8 +122,8 @@ router.put("/:id/graph", validate(graphSchema), async (req, res, next) => {
   try {
     const id = String(req.params.id);
     const graph = req.body as FlowGraph;
-    await saveDraftGraph(id, graph);
-    res.json(graph);
+    const saved = await saveDraftGraph(id, graph);
+    res.json(saved);
   } catch (e) {
     next(e);
   }
@@ -132,15 +141,6 @@ router.post("/:id/validate", async (req, res, next) => {
   try {
     const graph = await getDraftGraph(String(req.params.id));
     res.json({ errors: validateFlowGraph(graph) });
-  } catch (e) {
-    next(e);
-  }
-});
-
-router.post("/:id/import-linear", async (req, res, next) => {
-  try {
-    const graph = await importLinearToGraph(String(req.params.id));
-    res.json(graph);
   } catch (e) {
     next(e);
   }
