@@ -9,7 +9,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { callsApi } from "../api";
 
 type TestCallStatus = "idle" | "connecting" | "ready" | "ended" | "error";
@@ -31,8 +31,11 @@ type ActiveTestCallContextValue = {
   setReply: (value: string) => void;
   sending: boolean;
   isPlaying: boolean;
+  canRewind: boolean;
+  rewinding: boolean;
   sendReply: () => void;
   skipSpeak: () => void;
+  rewindStep: () => void;
 };
 
 const ActiveTestCallContext = createContext<ActiveTestCallContextValue | null>(null);
@@ -49,33 +52,46 @@ export function useActiveTestCall(): ActiveTestCallContextValue {
       setReply: () => {},
       sending: false,
       isPlaying: false,
+      canRewind: false,
+      rewinding: false,
       sendReply: () => {},
       skipSpeak: () => {},
+      rewindStep: () => {},
     };
   }
   return ctx;
 }
 
 export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
+  const qc = useQueryClient();
   const { data: activeCall } = useQuery({
     queryKey: ["activeCall"],
     queryFn: callsApi.active,
     refetchInterval: 2000,
   });
 
-  const testCallId =
-    activeCall?.externalCallId?.startsWith("test-") &&
-    (activeCall.status === "connected" ||
-      activeCall.status === "dialing" ||
-      activeCall.status === "ringing")
-      ? activeCall.id
-      : null;
+  const [sessionCallId, setSessionCallId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (
+      activeCall?.externalCallId?.startsWith("test-") &&
+      (activeCall.status === "connected" ||
+        activeCall.status === "dialing" ||
+        activeCall.status === "ringing")
+    ) {
+      setSessionCallId(activeCall.id);
+    }
+  }, [activeCall?.id, activeCall?.externalCallId, activeCall?.status]);
+
+  const testCallId = sessionCallId;
 
   const [status, setStatus] = useState<TestCallStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [reply, setReply] = useState("");
   const [sending, setSending] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [canRewind, setCanRewind] = useState(false);
+  const [rewinding, setRewinding] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -106,6 +122,30 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
     ws.send(JSON.stringify({ type: "skip_speak" }));
   }, [isPlaying, stopPlayback]);
 
+  const rewindStep = useCallback(async () => {
+    if (!testCallId || rewinding || sending) return;
+    setRewinding(true);
+    setError(null);
+    try {
+      stopPlayback();
+      await callsApi.testRewind(testCallId);
+      setSending(false);
+      void qc.invalidateQueries({ queryKey: ["activeCall"] });
+      void qc.invalidateQueries({ queryKey: ["call", testCallId] });
+    } catch (err) {
+      const msg =
+        err && typeof err === "object" && "response" in err
+          ? ((err as { response?: { data?: { error?: string } } }).response?.data?.error ??
+            "לא ניתן לחזור לשלב הקודם")
+          : err instanceof Error
+            ? err.message
+            : "לא ניתן לחזור לשלב הקודם";
+      setError(msg);
+    } finally {
+      setRewinding(false);
+    }
+  }, [rewinding, sending, stopPlayback, testCallId, qc]);
+
   const sendReply = useCallback(() => {
     const text = reply.trim();
     const ws = wsRef.current;
@@ -114,6 +154,28 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
     ws.send(JSON.stringify({ type: "text", text }));
     setReply("");
   }, [reply, sending, status]);
+
+  useEffect(() => {
+    if (!testCallId || status !== "ready") {
+      setCanRewind(false);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { canRewind: ok } = await callsApi.canTestRewind(testCallId);
+        if (!cancelled) setCanRewind(ok);
+      } catch {
+        if (!cancelled) setCanRewind(false);
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [testCallId, status, sending, rewinding, isPlaying]);
 
   useEffect(() => {
     if (!testCallId) {
@@ -214,8 +276,10 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
           if (msg.type === "hangup") {
             intentionalCloseRef.current = true;
             setStatus("ended");
-            finishPlayback();
             cleanup();
+            setSessionCallId(null);
+            void qc.invalidateQueries({ queryKey: ["activeCall"] });
+            void qc.invalidateQueries({ queryKey: ["calls"] });
             return;
           }
           if (msg.type === "error") {
@@ -259,7 +323,7 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
       intentionalCloseRef.current = true;
       cleanup();
     };
-  }, [testCallId, finishPlayback, stopPlayback]);
+  }, [testCallId, finishPlayback, stopPlayback, qc]);
 
   const value: ActiveTestCallContextValue = {
     callId: testCallId,
@@ -270,8 +334,11 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
     setReply,
     sending,
     isPlaying,
+    canRewind,
+    rewinding,
     sendReply,
     skipSpeak,
+    rewindStep,
   };
 
   return (
@@ -290,6 +357,9 @@ export function TestCallAudioPanel({ showWhenIdle = false }: { showWhenIdle?: bo
     isPlaying,
     sendReply,
     skipSpeak,
+    canRewind,
+    rewinding,
+    rewindStep,
   } = useActiveTestCall();
 
   if (!isTestCallActive && !showWhenIdle) return null;
@@ -326,18 +396,31 @@ export function TestCallAudioPanel({ showWhenIdle = false }: { showWhenIdle?: bo
     >
       <p className="font-medium">שיחת טסט (רמקול + הקלדה)</p>
       <p className="mt-1">{error ?? statusLabel[status]}</p>
-      {status === "ready" && isPlaying && (
+      {status === "ready" && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <button
             type="button"
-            className="rounded border border-emerald-600 bg-white px-3 py-1 text-sm text-emerald-800 hover:bg-emerald-100"
-            onClick={skipSpeak}
+            className="rounded border border-emerald-600 bg-white px-3 py-1 text-sm text-emerald-800 hover:bg-emerald-100 disabled:opacity-40"
+            onClick={() => void rewindStep()}
+            disabled={!canRewind || rewinding || sending}
+            title={canRewind ? "חזרה לשלב AI הקודם (טוען מחדש את הזרימה העדכנית)" : "אין שלב קודם"}
           >
-            דלג לסוף
+            {rewinding ? "חוזר..." : "שלב AI קודם"}
           </button>
-          <p className="text-xs text-emerald-700">
-            עוצר את הדיבור בלבד — לא שולח תשובת לקוח.
-          </p>
+          {isPlaying && (
+            <>
+              <button
+                type="button"
+                className="rounded border border-emerald-600 bg-white px-3 py-1 text-sm text-emerald-800 hover:bg-emerald-100"
+                onClick={skipSpeak}
+              >
+                דלג לסוף
+              </button>
+              <p className="text-xs text-emerald-700">
+                עוצר את הדיבור בלבד — לא שולח תשובת לקוח.
+              </p>
+            </>
+          )}
         </div>
       )}
       {canReply && (

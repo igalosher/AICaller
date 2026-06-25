@@ -8,10 +8,20 @@ import type {
 } from "./graphTypes.js";
 import { initSessionVariables } from "./variableBinding.js";
 
+export type TestRewindSnapshot = {
+  currentNodeId: string;
+  variables?: Record<string, unknown>;
+  lastSpokenText?: string;
+  mainCheckpoint?: import("./graphTypes.js").MainFlowCheckpoint;
+  lastTranscriptSegmentId: string;
+};
+
 export type GraphCallContext = {
   lastSpokenText?: string;
   variables?: Record<string, unknown>;
   mainCheckpoint?: import("./graphTypes.js").MainFlowCheckpoint;
+  /** Test-call only: stack of graph positions after each AI line (for step rewind). */
+  testRewindStack?: TestRewindSnapshot[];
 };
 
 const ENTITY_PATH_TO_INTENT: Record<string, string> = {
@@ -41,6 +51,7 @@ export function parseGraphContext(json: string): GraphCallContext {
       lastSpokenText: parsed.lastSpokenText,
       variables: parsed.variables ?? {},
       mainCheckpoint: parsed.mainCheckpoint,
+      testRewindStack: parsed.testRewindStack,
     };
   } catch {
     return { variables: {} };

@@ -27,6 +27,10 @@ export const callsApi = {
   start: (contactId: string) => api.post<Call>("/calls/start", { contactId }).then((r) => r.data),
   startTest: (contactId: string) => api.post<Call>("/calls/test-start", { contactId }).then((r) => r.data),
   hangUp: (id: string) => api.post<{ ok: boolean }>(`/calls/${id}/hangup`).then((r) => r.data),
+  testRewind: (id: string) =>
+    api.post<{ sayText: string; currentNodeId: string }>(`/calls/${id}/test-rewind`).then((r) => r.data),
+  canTestRewind: (id: string) =>
+    api.get<{ canRewind: boolean }>(`/calls/${id}/test-rewind`).then((r) => r.data),
   next: () => api.post<Call>("/calls/next").then((r) => r.data),
 };
 
@@ -68,6 +72,10 @@ export const callFlowsApi = {
   publish: (id: string) => api.post<CallFlow>(`/call-flows/${id}/publish`).then((r) => r.data),
   validate: (id: string) =>
     api.post<{ errors: { messageHe: string }[] }>(`/call-flows/${id}/validate`).then((r) => r.data),
+  aiEdit: (message: string, draftGraph?: import("./types").FlowGraph) =>
+    api
+      .post<import("./types").FlowAiEditResult>("/call-flows/active/ai-edit", { message, draftGraph }, { timeout: 120_000 })
+      .then((r) => r.data),
 };
 
 export const intentsApi = {

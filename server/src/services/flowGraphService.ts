@@ -8,7 +8,6 @@ import {
   SIGAL_QUALIFY,
   SOLD_GOODBYE,
 } from "../flow/starterFlow.js";
-import { normalizeFlowGraph } from "../flow/graphFlowEngine.js";
 import type { FlowGraph } from "../flow/graphTypes.js";
 
 export async function getActiveFlowGraph(): Promise<FlowGraph | null> {
@@ -242,6 +241,21 @@ export function getPublishedGraphForCall(flow: {
   draftGraphJson: string;
 }): FlowGraph | null {
   const json = flow.publishedGraphJson !== "{}" ? flow.publishedGraphJson : flow.draftGraphJson;
+  if (!json || json === "{}") return null;
+  return enhanceSigalGraph(JSON.parse(json) as FlowGraph);
+}
+
+/** Test calls prefer the latest draft graph so flow-builder edits apply without publish. */
+export function getGraphForTestCall(flow: {
+  publishedGraphJson: string;
+  draftGraphJson: string;
+}): FlowGraph | null {
+  const json =
+    flow.draftGraphJson && flow.draftGraphJson !== "{}"
+      ? flow.draftGraphJson
+      : flow.publishedGraphJson !== "{}"
+        ? flow.publishedGraphJson
+        : null;
   if (!json || json === "{}") return null;
   return enhanceSigalGraph(JSON.parse(json) as FlowGraph);
 }

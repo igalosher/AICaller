@@ -244,11 +244,11 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   b.link(speedFiber.route, provider.speak, { intentId: "select_speed_600" });
   b.link(speedFiber.route, provider.speak, { intentId: "select_speed_1000" });
   b.link(speedFiber.route, speedFiber.speak, { intentId: "silence", label: "שתיקה" });
-  b.link(speedFiber.route, speedFiber.speak, { isDefault: true, label: "חזרה על שאלה" });
+  b.link(speedFiber.route, provider.speak, { isDefault: true, label: "המשך" });
   b.link(speedReg.route, provider.speak, { intentId: "select_speed_100" });
   b.link(speedReg.route, provider.speak, { intentId: "select_speed_200" });
   b.link(speedReg.route, speedReg.speak, { intentId: "silence", label: "שתיקה" });
-  b.link(speedReg.route, speedReg.speak, { isDefault: true, label: "חזרה על שאלה" });
+  b.link(speedReg.route, provider.speak, { isDefault: true, label: "המשך" });
 
   // Sales path
   b.link(provider.route, price.speak, { intentId: "provider_bezeq" });
@@ -321,10 +321,13 @@ export function createSigalMiniFlowGraph(): FlowGraph {
       { name: "NumOfTVs", type: "int", defaultValue: 0 },
       { name: "MonthlyPrice", type: "int", defaultValue: 0 },
       { name: "PriceAnswerText", type: "string", defaultValue: "" },
+      { name: "SpeedAnswerText", type: "string", defaultValue: "" },
       { name: "CallbackAnswerText", type: "string", defaultValue: "" },
     ],
     variableBindings: [
       { listenNodeId: "listen_tv", variableName: "NumOfTVs", source: "entity" },
+      { listenNodeId: "listen_speed_fiber", variableName: "SpeedAnswerText", source: "raw_text" },
+      { listenNodeId: "listen_speed_reg", variableName: "SpeedAnswerText", source: "raw_text" },
       { listenNodeId: "listen_price", variableName: "PriceAnswerText", source: "raw_text" },
       { listenNodeId: "listen_price", variableName: "MonthlyPrice", source: "entity", path: "monthly_price" },
       { listenNodeId: "listen_callback", variableName: "CallbackAnswerText", source: "raw_text" },
@@ -444,6 +447,18 @@ function mergeAddressBinding(graph: FlowGraph): FlowVariableBinding[] {
       });
     }
   }
+  for (const listenId of ["listen_speed_fiber", "listen_speed_reg"] as const) {
+    if (
+      graph.nodes.some((n) => n.id === listenId) &&
+      !bindings.some((b) => b.listenNodeId === listenId && b.variableName === "SpeedAnswerText")
+    ) {
+      bindings.push({
+        listenNodeId: listenId,
+        variableName: "SpeedAnswerText",
+        source: "raw_text",
+      });
+    }
+  }
   return bindings;
 }
 
@@ -452,6 +467,7 @@ const DEFAULT_FLOW_VARIABLES: Record<string, FlowVariableDef> = {
   CustomerAddress: { name: "CustomerAddress", type: "string", defaultValue: "" },
   MonthlyPrice: { name: "MonthlyPrice", type: "int", defaultValue: 0 },
   PriceAnswerText: { name: "PriceAnswerText", type: "string", defaultValue: "" },
+  SpeedAnswerText: { name: "SpeedAnswerText", type: "string", defaultValue: "" },
   CallbackAnswerText: { name: "CallbackAnswerText", type: "string", defaultValue: "" },
 };
 
@@ -789,6 +805,52 @@ export function patchSigalPriceRouting(graph: FlowGraph): FlowGraph {
   return { ...withBindings, variables };
 }
 
+/** Speed question: any spoken answer (e.g. "200 מגה") advances — only silence repeats the question. */
+export function patchSigalSpeedRouting(graph: FlowGraph): FlowGraph {
+  if (!isSigalMiniFlowGraph(graph)) return graph;
+
+  let nodes = graph.nodes.filter(
+    (n) => n.id !== "decide_speed_reg" && n.id !== "decide_speed_fiber",
+  );
+  let edges = graph.edges.filter(
+    (e) => e.source !== "decide_speed_reg" && e.source !== "decide_speed_fiber",
+  );
+
+  const patchOne = (routeId: string, repeatSpeakId: string, providerSpeakId: string) => {
+    if (!nodes.some((n) => n.id === routeId)) return;
+
+    edges = edges.filter(
+      (e) => !(e.source === routeId && e.isDefault && e.target === repeatSpeakId),
+    );
+    const existingDefault = edges.find((e) => e.source === routeId && e.isDefault);
+    if (existingDefault) {
+      edges = edges.map((e) =>
+        e.source === routeId && e.isDefault
+          ? { ...e, target: providerSpeakId, label: e.label ?? "המשך" }
+          : e,
+      );
+    } else {
+      edges.push({
+        id: `e_${routeId}_default_provider`,
+        source: routeId,
+        target: providerSpeakId,
+        isDefault: true,
+        label: "המשך",
+      });
+    }
+  };
+
+  patchOne("route_speed_reg", "speak_speed_reg", "speak_provider");
+  patchOne("route_speed_fiber", "speak_speed_fiber", "speak_provider");
+
+  const withBindings = patchSigalFlowVariables({ ...graph, nodes, edges, interruptQa: false });
+  const variables = withBindings.variables ?? [];
+  if (!variables.some((v) => v.name === "SpeedAnswerText")) {
+    variables.push(DEFAULT_FLOW_VARIABLES.SpeedAnswerText);
+  }
+  return { ...withBindings, variables };
+}
+
 /** Callback yes/no: "כן" is classified as greeting_ack, not agree_callback — route both to goodbye_lead. */
 export function patchSigalCallbackRouting(graph: FlowGraph): FlowGraph {
   if (!isSigalMiniFlowGraph(graph)) return graph;
@@ -894,7 +956,9 @@ export function enhanceSigalGraph(graph: FlowGraph): FlowGraph {
   return patchSigalFlowVariables(
     patchConsolidateTvVariables(
       patchSigalCallbackRouting(
-        patchSigalPriceRouting(patchSigalAutoAdvanceSpeaks(patchSigalGraphRouting(graph))),
+        patchSigalSpeedRouting(
+          patchSigalPriceRouting(patchSigalAutoAdvanceSpeaks(patchSigalGraphRouting(graph))),
+        ),
       ),
     ),
   );

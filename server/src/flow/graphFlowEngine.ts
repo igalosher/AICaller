@@ -12,6 +12,17 @@ export class GraphFlowEngine {
     return this.graph;
   }
 
+  /** Replace graph (e.g. test call picked up flow-builder draft) while keeping position when possible. */
+  replaceGraph(graph: FlowGraph, preferredNodeId?: string): void {
+    this.graph = graph;
+    const candidate = preferredNodeId ?? this.currentNodeId;
+    if (graph.nodes.some((n) => n.id === candidate)) {
+      this.currentNodeId = candidate;
+      return;
+    }
+    this.currentNodeId = graph.startNodeId;
+  }
+
   getCurrentNode(): FlowNode | undefined {
     return this.graph.nodes.find((n) => n.id === this.currentNodeId);
   }

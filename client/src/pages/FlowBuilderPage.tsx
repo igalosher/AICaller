@@ -18,9 +18,10 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
-import { memo, useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { callFlowsApi, intentsApi } from "../api";
+import { FlowAiAssistantPanel } from "../components/FlowAiAssistantPanel";
 import type {
   FlowEdge,
   FlowEdgeCondition,
@@ -66,6 +67,7 @@ const MemoFlowNodeCard = memo(FlowNodeCard);
 
 let requestFitView: (() => void) | null = null;
 let requestFocusNode: ((nodeId: string) => void) | null = null;
+let requestFocusNodes: ((nodeIds: string[]) => void) | null = null;
 
 function FitViewController() {
   const { fitView } = useReactFlow();
@@ -76,10 +78,19 @@ function FitViewController() {
     requestFocusNode = (nodeId: string) => {
       void fitView({ nodes: [{ id: nodeId }], padding: 0.35, duration: 200 });
     };
+    requestFocusNodes = (nodeIds: string[]) => {
+      if (nodeIds.length === 0) return;
+      if (nodeIds.length === 1) {
+        void fitView({ nodes: [{ id: nodeIds[0]! }], padding: 0.35, duration: 200 });
+      } else {
+        void fitView({ nodes: nodeIds.map((id) => ({ id })), padding: 0.25, duration: 250 });
+      }
+    };
     requestAnimationFrame(() => requestFitView?.());
     return () => {
       requestFitView = null;
       requestFocusNode = null;
+      requestFocusNodes = null;
     };
   }, [fitView]);
   return null;
@@ -230,6 +241,28 @@ function reactFlowToGraph(
   };
 }
 
+function AiSparkleIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
+      <path d="M20 3v4" />
+      <path d="M22 5h-4" />
+      <path d="M4 17v2" />
+      <path d="M5 18H3" />
+    </svg>
+  );
+}
+
 export function FlowBuilderPage() {
   const [searchParams] = useSearchParams();
   const focusParam = searchParams.get("focus");
@@ -261,6 +294,11 @@ export function FlowBuilderPage() {
   const [sideFlows, setSideFlows] = useState<SideFlowDef[]>(graph?.sideFlows ?? []);
   const [sidebarTab, setSidebarTab] = useState<"node" | "variables">("node");
   const [aligning, setAligning] = useState(false);
+  const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  const [aiUndoCount, setAiUndoCount] = useState(0);
+  const aiUndoStackRef = useRef<FlowGraph[]>([]);
+  const applyingAiPatchRef = useRef(false);
+  const MAX_AI_UNDO = 20;
 
   const speakNodes = useMemo(
     () => rawNodes.filter((n) => n.type === "speak"),
@@ -299,25 +337,42 @@ export function FlowBuilderPage() {
     requestAnimationFrame(() => requestFocusNode?.(focusParam));
   }, [focusParam, graph, rawNodes]);
 
+  const clearAiUndoStack = useCallback(() => {
+    if (applyingAiPatchRef.current) return;
+    aiUndoStackRef.current = [];
+    setAiUndoCount(0);
+  }, []);
+
+  const pushAiUndoSnapshot = useCallback((snapshot: FlowGraph) => {
+    const stack = [...aiUndoStackRef.current, snapshot];
+    while (stack.length > MAX_AI_UNDO) stack.shift();
+    aiUndoStackRef.current = stack;
+    setAiUndoCount(stack.length);
+  }, []);
+
   const onConnect = useCallback(
-    (connection: Connection) => setEdges((eds: Edge[]) => addEdge(connection, eds)),
-    [setEdges],
+    (connection: Connection) => {
+      clearAiUndoStack();
+      setEdges((eds: Edge[]) => addEdge(connection, eds));
+    },
+    [setEdges, clearAiUndoStack],
   );
 
   const handleNodesChange = useCallback(
     (changes: NodeChange[]) => {
+      const meaningful = changes.some((c) => c.type === "add" || c.type === "remove");
+      if (meaningful) clearAiUndoStack();
       onNodesChange(changes.filter((change) => change.type !== "dimensions"));
     },
-    [onNodesChange],
+    [onNodesChange, clearAiUndoStack],
   );
 
   const selectedNode = rawNodes.find((n) => n.id === selectedId);
 
-  const saveGraphDraft = useCallback(async () => {
-    if (!flow) throw new Error("אין זרימה פעילה לשמירה");
+  const buildGraphFromState = useCallback((): FlowGraph => {
     const startNodeId = graph?.startNodeId ?? nodes[0]?.id;
     if (!startNodeId) throw new Error("הגרף ריק — אין צומת התחלה");
-    const g = patchMissingDefaultEdges(
+    return patchMissingDefaultEdges(
       reactFlowToGraph(
         nodes,
         edges,
@@ -330,8 +385,63 @@ export function FlowBuilderPage() {
         sideFlows,
       ),
     );
+  }, [graph?.startNodeId, nodes, edges, rawNodes, flowVariables, lookupTables, variableBindings, interruptQa, sideFlows]);
+
+  const applyGraphToCanvas = useCallback(
+    (g: FlowGraph, options?: { focusNodeIds?: string[]; selectId?: string }) => {
+      qc.setQueryData(["flowGraph", flow?.id], g);
+      const rf = graphToReactFlow(g);
+      setNodes(rf.nodes);
+      setEdges(rf.edges);
+      setRawNodes(g.nodes);
+      setFlowVariables(g.variables ?? []);
+      setLookupTables(g.lookupTables ?? []);
+      setVariableBindings(g.variableBindings ?? []);
+      setInterruptQa(g.interruptQa !== false);
+      setSideFlows(g.sideFlows ?? []);
+      setValidationErrors([]);
+      const focusIds = options?.focusNodeIds?.filter((id) => g.nodes.some((n) => n.id === id)) ?? [];
+      const selectId = options?.selectId ?? focusIds[0];
+      if (selectId) {
+        setSelectedId(selectId);
+        setSidebarTab("node");
+      }
+      requestAnimationFrame(() => {
+        if (focusIds.length > 0) requestFocusNodes?.(focusIds);
+        else requestFitView?.();
+      });
+    },
+    [flow?.id, qc, setEdges, setNodes],
+  );
+
+  const handleAiApply = useCallback(
+    (g: FlowGraph, affectedNodeIds: string[], summaryHe: string) => {
+      applyingAiPatchRef.current = true;
+      applyGraphToCanvas(g, { focusNodeIds: affectedNodeIds });
+      applyingAiPatchRef.current = false;
+      setStatusBanner(summaryHe);
+      setActionError(null);
+    },
+    [applyGraphToCanvas],
+  );
+
+  const handleAiUndo = useCallback(() => {
+    const stack = aiUndoStackRef.current;
+    if (stack.length === 0) return;
+    const prev = stack.pop()!;
+    aiUndoStackRef.current = stack;
+    setAiUndoCount(stack.length);
+    applyingAiPatchRef.current = true;
+    applyGraphToCanvas(prev);
+    applyingAiPatchRef.current = false;
+    setStatusBanner("בוטל שינוי AI אחרון");
+  }, [applyGraphToCanvas]);
+
+  const saveGraphDraft = useCallback(async () => {
+    if (!flow) throw new Error("אין זרימה פעילה לשמירה");
+    const g = buildGraphFromState();
     return callFlowsApi.saveGraph(flow.id, g);
-  }, [flow, nodes, edges, graph?.startNodeId, rawNodes, flowVariables, lookupTables, variableBindings, interruptQa, sideFlows]);
+  }, [flow, buildGraphFromState]);
 
   const applySavedGraph = useCallback(
     (g: FlowGraph, message: string) => {
@@ -430,6 +540,7 @@ export function FlowBuilderPage() {
   });
 
   const addNode = (type: FlowNode["type"]) => {
+    clearAiUndoStack();
     const id = `${type}_${Date.now()}`;
     const newNode: FlowNode =
       type === "speak"
@@ -452,6 +563,7 @@ export function FlowBuilderPage() {
 
   const updateSelectedSpeak = (text: string) => {
     if (!selectedId) return;
+    clearAiUndoStack();
     setRawNodes((prev: FlowNode[]) =>
       prev.map((n) => (n.id === selectedId && n.type === "speak" ? { ...n, text } : n)),
     );
@@ -464,12 +576,14 @@ export function FlowBuilderPage() {
 
   const updateSelectedReturnsToMain = (returnsToMain: boolean) => {
     if (!selectedId) return;
+    clearAiUndoStack();
     setRawNodes((prev: FlowNode[]) =>
       prev.map((n) => (n.id === selectedId && n.type === "speak" ? { ...n, returnsToMain } : n)),
     );
   };
 
   const addSideFlow = () => {
+    clearAiUndoStack();
     const id = `sf_${Date.now()}`;
     setSideFlows((prev) => [
       ...prev,
@@ -484,6 +598,7 @@ export function FlowBuilderPage() {
   };
 
   const updateEdgeCondition = (edgeId: string, condition: FlowEdgeCondition | undefined) => {
+    clearAiUndoStack();
     setEdges((prev: Edge[]) =>
       prev.map((e: Edge) =>
         e.id === edgeId
@@ -497,6 +612,7 @@ export function FlowBuilderPage() {
     edgeId: string,
     patch: Partial<FlowEdgeData> & { markDefault?: boolean },
   ) => {
+    clearAiUndoStack();
     const target = edges.find((e) => e.id === edgeId);
     if (!target) return;
 
@@ -619,7 +735,22 @@ export function FlowBuilderPage() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-2xl font-bold">בניית זרימה</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-2xl font-bold">בניית זרימה</h2>
+          <button
+            type="button"
+            className={`inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors ${
+              aiPanelOpen
+                ? "border-violet-600 bg-violet-200 text-violet-900"
+                : "border-violet-400 bg-violet-50 text-violet-800 hover:bg-violet-100"
+            }`}
+            onClick={() => setAiPanelOpen((v) => !v)}
+            aria-label={aiPanelOpen ? "סגור עוזר AI" : "פתח עוזר AI"}
+            title={aiPanelOpen ? "סגור עוזר AI" : "עוזר AI לזרימה"}
+          >
+            <AiSparkleIcon className="h-5 w-5" />
+          </button>
+        </div>
         <div className="flex flex-wrap gap-2">
           {(["speak", "listen", "intent_route", "decision", "end"] as const).map((t) => (
             <button key={t} className="rounded border px-3 py-1 text-sm" onClick={() => addNode(t)}>
@@ -1290,6 +1421,17 @@ export function FlowBuilderPage() {
           )}
         </div>
       </div>
+
+      <FlowAiAssistantPanel
+        open={aiPanelOpen}
+        onClose={() => setAiPanelOpen(false)}
+        getCurrentGraph={buildGraphFromState}
+        onBeforeApply={pushAiUndoSnapshot}
+        onApply={handleAiApply}
+        undoCount={aiUndoCount}
+        onUndo={handleAiUndo}
+        canUndo={aiUndoCount > 0}
+      />
     </div>
   );
 }

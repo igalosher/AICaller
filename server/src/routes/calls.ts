@@ -4,6 +4,8 @@ import {
   getCall,
   hangUpCall,
   listCalls,
+  canRewindTestCall,
+  rewindTestCallStep,
   startCall,
   startNextCall,
   startTestCall,
@@ -63,6 +65,24 @@ router.post("/:id/hangup", async (req, res, next) => {
   try {
     await hangUpCall(String(req.params.id));
     res.json({ ok: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post("/:id/test-rewind", async (req, res, next) => {
+  try {
+    const callId = String(req.params.id);
+    res.json(await rewindTestCallStep(callId));
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get("/:id/test-rewind", async (req, res, next) => {
+  try {
+    const callId = String(req.params.id);
+    res.json({ canRewind: await canRewindTestCall(callId) });
   } catch (e) {
     next(e);
   }

@@ -78,6 +78,12 @@ export interface FlowGraph {
   sideFlows?: SideFlowDef[];
 }
 
+export interface FlowAiEditResult {
+  draftGraph: FlowGraph;
+  summaryHe: string;
+  affectedNodeIds: string[];
+}
+
 export const CONDITION_OP_LABELS: Record<ConditionOp, string> = {
   var_eq: "שווה ל",
   var_gt: "גדול מ",

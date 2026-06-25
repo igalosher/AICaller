@@ -11,6 +11,7 @@ import {
   publishFlowGraph,
   saveDraftGraph,
 } from "../services/flowGraphService.js";
+import { editFlowWithAi } from "../services/flowAiEditService.js";
 import { validateFlowGraph } from "../flow/graphValidation.js";
 import { validate } from "../middleware/errorHandler.js";
 import type { FlowGraph } from "../flow/graphTypes.js";
@@ -104,6 +105,27 @@ router.post("/preview-opening", async (req, res, next) => {
       customerName?: string;
     };
     res.json({ preview: previewOpeningLine(openingTemplate, customerName) });
+  } catch (e) {
+    next(e);
+  }
+});
+
+const aiEditSchema = z.object({
+  message: z.string().min(1),
+  draftGraph: graphSchema.optional(),
+});
+
+router.post("/active/ai-edit", validate(aiEditSchema), async (req, res, next) => {
+  try {
+    const { message, draftGraph } = req.body as { message: string; draftGraph?: FlowGraph };
+    const flow = await getActiveCallFlow();
+    if (!flow) {
+      res.status(404).json({ error: "אין זרימה פעילה" });
+      return;
+    }
+    const base = draftGraph ?? (await getDraftGraph(flow.id));
+    const result = await editFlowWithAi(message, base);
+    res.json(result);
   } catch (e) {
     next(e);
   }

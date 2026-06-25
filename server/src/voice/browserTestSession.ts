@@ -1,3 +1,4 @@
+import type { CallOutcome } from "@prisma/client";
 import type WebSocket from "ws";
 import { prisma } from "../db.js";
 import { logger } from "../logger.js";
@@ -7,22 +8,26 @@ type SpeechHandler = (callId: string, text: string) => Promise<void>;
 type SessionStartHandler = (callId: string) => Promise<void>;
 type SessionEndHandler = (callId: string) => Promise<void>;
 type PlaybackIdleHandler = (callId: string) => void;
+type PendingCallEndHandler = (callId: string, outcome: CallOutcome) => Promise<void>;
 
 let onCustomerSpeech: SpeechHandler = async () => {};
 let onSessionStart: SessionStartHandler = async () => {};
 let onSessionEnd: SessionEndHandler = async () => {};
 let onPlaybackIdle: PlaybackIdleHandler = () => {};
+let onPendingCallEnd: PendingCallEndHandler = async () => {};
 
 export function registerBrowserTestHandlers(handlers: {
   onCustomerSpeech: SpeechHandler;
   onSessionStart: SessionStartHandler;
   onSessionEnd?: SessionEndHandler;
   onPlaybackIdle?: PlaybackIdleHandler;
+  onPendingCallEnd?: PendingCallEndHandler;
 }): void {
   onCustomerSpeech = handlers.onCustomerSpeech;
   onSessionStart = handlers.onSessionStart;
   onSessionEnd = handlers.onSessionEnd ?? (async () => {});
   onPlaybackIdle = handlers.onPlaybackIdle ?? (() => {});
+  onPendingCallEnd = handlers.onPendingCallEnd ?? (async () => {});
 }
 
 interface BrowserTestSession {
@@ -33,6 +38,8 @@ interface BrowserTestSession {
   lastFinalAt: number;
   /** True after `play` sent until skip, stop, or customer speech interrupt. */
   speaking: boolean;
+  /** Finalize call + hangup after current clip finishes playing. */
+  pendingCallEnd?: CallOutcome;
 }
 
 const sessions = new Map<string, BrowserTestSession>();
@@ -138,18 +145,41 @@ async function handleBrowserTestMessage(callId: string, message: BrowserClientMe
     session.speaking = false;
     session.ws.send(JSON.stringify({ type: "stop_playback" }));
     session.ws.send(JSON.stringify({ type: "speak_skipped" }));
+    await completePendingCallEnd(callId);
     onPlaybackIdle(callId);
     return;
   }
 
   if (message.type === "playback_done") {
     session.speaking = false;
+    await completePendingCallEnd(callId);
     onPlaybackIdle(callId);
     return;
   }
 
   if (message.type === "text" && message.text.trim()) {
     await handleCustomerText(callId, message.text.trim());
+  }
+}
+
+export function setBrowserPendingCallEnd(callId: string, outcome: CallOutcome): void {
+  const session = sessions.get(callId);
+  if (!session) return;
+  session.pendingCallEnd = outcome;
+}
+
+export async function completePendingCallEnd(callId: string): Promise<void> {
+  const session = sessions.get(callId);
+  if (!session?.pendingCallEnd) return;
+  const outcome = session.pendingCallEnd;
+  session.pendingCallEnd = undefined;
+  try {
+    await onPendingCallEnd(callId, outcome);
+  } catch (err) {
+    logger.error({ err, callId }, "pending test call end failed");
+  }
+  if (session.ws.readyState === 1) {
+    session.ws.send(JSON.stringify({ type: "hangup" }));
   }
 }
 
@@ -160,11 +190,20 @@ export async function speakToBrowser(
   options?: TtsOptions,
 ): Promise<boolean> {
   const session = sessions.get(callId);
-  if (!session || session.ws.readyState !== 1 || !text.trim()) return false;
+  if (!session || session.ws.readyState !== 1) return false;
+  if (!text.trim()) {
+    if (endCall && session.pendingCallEnd) {
+      await completePendingCallEnd(callId);
+    }
+    return false;
+  }
 
   const audio = await synthesizeHebrewSpeechMp3(text, options);
   if (!audio?.length) {
     logger.warn({ callId }, "Browser test TTS skipped — no audio");
+    if (endCall && session.pendingCallEnd) {
+      await completePendingCallEnd(callId);
+    }
     return false;
   }
 
@@ -176,10 +215,6 @@ export async function speakToBrowser(
       audio: audio.toString("base64"),
     }),
   );
-
-  if (endCall) {
-    session.ws.send(JSON.stringify({ type: "hangup" }));
-  }
 
   return true;
 }
