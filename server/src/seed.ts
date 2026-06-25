@@ -2,7 +2,7 @@ import { prisma } from "./db.js";
 import { refreshProductKnowledge } from "./services/productKnowledge.js";
 import { ensureYesCatalogSeeded } from "./services/yesCatalogService.js";
 import { seedDefaultIntents } from "./services/intentService.js";
-import { migrateToSigalMiniFlowIfNeeded } from "./services/flowGraphService.js";
+import { migrateToSigalMiniFlowIfNeeded, patchActiveFlowEnhancements } from "./services/flowGraphService.js";
 import { createSigalMiniFlowGraph, STAGED_OPENING } from "./flow/sigalMiniFlow.js";
 
 export async function runSeed() {
@@ -37,6 +37,7 @@ export async function runSeed() {
     });
   } else {
     await migrateToSigalMiniFlowIfNeeded();
+    await patchActiveFlowEnhancements();
   }
 
   await refreshProductKnowledge();

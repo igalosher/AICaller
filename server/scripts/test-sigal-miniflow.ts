@@ -24,26 +24,32 @@ if (node?.id !== "speak_opening") {
   process.exit(1);
 }
 
+const opening = graph.nodes.find((n) => n.id === "speak_opening");
+if (opening?.type !== "speak" || !opening.text.includes("טלויזיות")) {
+  console.error("Opening should include the TV count question");
+  process.exit(1);
+}
+
 const edge = engine.getNextAutoEdge(node.id);
-if (!edge || edge.target !== "listen_opening") {
-  console.error("Opening should link to listen_opening");
+if (!edge || edge.target !== "listen_tv") {
+  console.error("Opening should link to listen_tv, got", edge?.target);
   process.exit(1);
 }
 
 engine.currentNodeId = edge.target;
 engine.advanceFromListen();
 const route = engine.getCurrentNode();
-if (route?.id !== "route_opening") {
-  console.error("Expected route_opening after listen, got", route?.id);
+if (route?.id !== "route_tv") {
+  console.error("Expected route_tv after listen, got", route?.id);
   process.exit(1);
 }
 
-const tvEdge = engine.advanceByClassification(
-  { intentId: "greeting_ack", confidence: 1, entities: {}, classifier: "rule" },
+const inetNode = engine.advanceByClassification(
+  { intentId: "provide_tv_count", confidence: 1, entities: { tv_count: 2 }, classifier: "rule" },
   {},
 );
-if (tvEdge?.id !== "speak_tv") {
-  console.error("Default opening route should reach speak_tv, got", tvEdge?.id);
+if (inetNode?.id !== "speak_inet") {
+  console.error("TV answer should reach speak_inet, got", inetNode?.id);
   process.exit(1);
 }
 

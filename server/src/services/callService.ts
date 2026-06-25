@@ -41,6 +41,8 @@ import {
   getListenCheckpoint,
   getListenScopedIntentIds,
   initGraphContext,
+  isOrphanAnnouncementRoute,
+  advanceOrphanAnnouncementRoute,
   parseGraphContext,
   resolveListenIdFromPosition,
   serializeGraphContext,
@@ -1120,6 +1122,33 @@ async function processGraphTurn(
       break;
     }
     node = next;
+  }
+
+  while (isOrphanAnnouncementRoute(engine)) {
+    node = advanceOrphanAnnouncementRoute(engine) ?? undefined;
+    while (node?.type === "speak" && !node.id.startsWith("goodbye_")) {
+      const part = await speakFromNode(
+        node,
+        call.contact,
+        undefined,
+        undefined,
+        undefined,
+        ctx.variables,
+      );
+      spokenParts.push(part);
+      const edge = engine.getNextAutoEdge(node.id);
+      if (!edge) {
+        node = undefined;
+        break;
+      }
+      engine.currentNodeId = edge.target;
+      const next = engine.getCurrentNode();
+      if (next?.type !== "speak" || next.id.startsWith("goodbye_")) {
+        node = next;
+        break;
+      }
+      node = next;
+    }
   }
 
   if (spokenParts.length > 0) {

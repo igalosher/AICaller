@@ -1,6 +1,7 @@
 import type { GraphFlowEngine } from "./graphFlowEngine.js";
 import type {
   FlowGraph,
+  FlowNode,
   FlowVariableBinding,
   SideFlowDef,
   SpeakNode,
@@ -203,4 +204,27 @@ export function speakNodeForListen(
   }
 
   return undefined;
+}
+
+/** Route reached from a speak node without a listen (announcement handoff) — auto-continue. */
+export function isOrphanAnnouncementRoute(engine: GraphFlowEngine): boolean {
+  const node = engine.getCurrentNode();
+  if (node?.type !== "intent_route") return false;
+  if (getListenCheckpoint(engine)) return false;
+  const incoming = engine.getGraph().edges.filter((e) => e.target === node.id);
+  if (incoming.length === 0) return false;
+  if (!incoming.every((e) => engine.getGraph().nodes.find((n) => n.id === e.source)?.type === "speak")) {
+    return false;
+  }
+  const outgoing = engine.getOutgoingEdges();
+  return outgoing.length > 0 && outgoing.every((e) => e.target.startsWith("speak_"));
+}
+
+export function advanceOrphanAnnouncementRoute(engine: GraphFlowEngine): FlowNode | null {
+  if (!isOrphanAnnouncementRoute(engine)) return engine.getCurrentNode() ?? null;
+  const outgoing = engine.getOutgoingEdges().filter((e) => e.target.startsWith("speak_"));
+  const edge = outgoing.find((e) => e.isDefault) ?? outgoing[0];
+  if (!edge) return engine.getCurrentNode() ?? null;
+  engine.currentNodeId = edge.target;
+  return engine.getCurrentNode() ?? null;
 }

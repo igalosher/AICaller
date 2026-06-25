@@ -22,8 +22,14 @@ export class GraphFlowEngine {
   }
 
   getNextAutoEdge(nodeId?: string) {
-    const outgoing = this.getOutgoingEdges(nodeId);
+    const id = nodeId ?? this.currentNodeId;
+    const node = this.graph.nodes.find((n) => n.id === id);
+    const outgoing = this.getOutgoingEdges(id);
     if (outgoing.length === 1) return outgoing[0];
+    if (node?.type === "speak" && node.autoAdvance) {
+      const autoChain = outgoing.find((e) => !e.intentId && e.target.startsWith("speak_"));
+      if (autoChain) return autoChain;
+    }
     return outgoing.find((e) => !e.intentId && !e.isDefault) ?? outgoing[0];
   }
 

@@ -55,6 +55,8 @@ export interface SpeakNode extends FlowNodeBase {
   useLlm?: boolean;
   /** When true, after this line the runtime returns to the main flow and repeats the saved question. */
   returnsToMain?: boolean;
+  /** Informational line — runtime chains directly to the next speak without waiting at listen/route. */
+  autoAdvance?: boolean;
 }
 
 export interface ListenNode extends FlowNodeBase {

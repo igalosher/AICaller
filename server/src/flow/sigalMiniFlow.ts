@@ -7,11 +7,15 @@ import type {
 } from "./graphTypes.js";
 
 export const STAGED_OPENING = `שלום {{customer_first_name}} {{customer_family_name}},
-כאן סיגל מחברת YES, אני עוזרת דיגיטלית.
-בעבר {{g:התעניין|התעניינת}} בהצטרפות אלינו,
+כאן סִגׇּל מֵחֶבְרַת YES, אני עוזרת דיגיטלית. נוצרתי על ידי יִגְאָל אֹשֶׁר לֵוִין, אגב הוא מוסר דש.
+בעבר התעניינת בהצטרפות אלינו,
 יש לנו הצעה במחירים אטרקטיביים ומתנה למצטרפים.
 במידה ולא {{g:תרצה|תרצי}} שנפנה אליך בעתיד, {{g:אמור|אמרי}} את המילה "הסר".
-בכל שלב אפשר לשאול שאלות בנוגע לחבילות, ערוצים, אינטרנט ומבצעים.`;
+בכל שלב אפשר לשאול שאלות בנוגע לחבילות, ערוצים, אינטרנט ומבצעים.
+על מנת שנוכל להתאים לך את החבילה המשתלמת ביותר נשמח לדעת כמה טלויזיות יש לך בבית?`;
+
+const STAGED_INET = `הבנתי שיש לך {{NumOfTVs}} טלויזיות בבית.
+איזו תשתית אינטרנט יש לך בבית? רגיל, סיבים או לא ידוע?`;
 
 export const OPT_OUT_GOODBYE = "תודה רבה ויום נעים";
 export const LEAD_GOODBYE = "מעולה, נציג יחזור אלייך בהקדם. יום נעים!";
@@ -79,27 +83,18 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   let y = 0;
   const dy = 220;
 
-  const opening = b.stage("opening", "פתיחה", STAGED_OPENING, { x, y: y });
-  b.speak("speak_hi", "ברכה", "היוש", { x: x - 220, y: y + 80 });
+  const openingSpeak = b.speak("speak_opening", "פתיחה", STAGED_OPENING, { x, y });
+  const tvListen = b.listen("listen_tv", "האזנה: כמה טלוויזיות", { x, y: y + 80 });
+  const tvRoute = b.route("route_tv", "ניתוב: כמה טלוויזיות", { x, y: y + 160 });
+  b.link(openingSpeak, tvListen);
+  b.link(tvListen, tvRoute);
   y += dy;
-  const tv = b.stage(
-    "tv",
-    "כמה טלוויזיות",
-    "על מנת שנוכל להתאים לך את החבילה המשתלמת ביותר נשמח לדעת כמה טלויזיות יש לך בבית",
-    { x, y },
-  );
-  y += dy;
-  const inet = b.stage(
-    "inet",
-    "תשתית אינטרנט",
-    "איזו תשתית אינטרנט יש לך בבית? רגיל, סיבים או לא יודע?",
-    { x, y },
-  );
+  const inet = b.stage("inet", "תשתית אינטרנט", STAGED_INET, { x, y });
   y += dy;
   const address = b.stage(
     "address",
     "כתובת לבדיקת סיבים",
-    "נשמח לבדוק עבורך היתכנות לתשתית סיבים אצלך בכתובת, מה הכתובת שלך (עיר, רחוב, מספר בית, וכניה אם יש)",
+    "נשמח לבדוק עבורך היתכנות לתשתית סיבים אצלך בכתובת, מה הכתובת שלך? (עיר, רחוב, מספר בית, וכניסה אם יש)",
     { x: x - 200, y },
   );
   const fiberYes = b.stage(
@@ -190,21 +185,9 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   b.end("end_refused", "סירוב", "refused", { x: x - 200, y: y + 200 });
   b.end("end_blacklist", "הוסר", "refused", { x: x - 400, y: 320 });
 
-  // Opening → TV
-  b.link(opening.route, tv.speak, { intentId: "ask_offer", label: "מה ההצעה" });
-  b.link(opening.route, tv.speak, { intentId: "silence", label: "שתיקה" });
-  b.link(opening.route, "speak_hi", { intentId: "greeting_hi", label: "ברכה" });
-  b.link(opening.route, tv.speak, { intentId: "greeting_ack", label: "המשך" });
-  b.link("speak_hi", tv.speak);
-  b.link(opening.route, tv.speak, { isDefault: true, label: "ברירת מחדל" });
-  b.link(opening.route, "goodbye_blacklist", { intentId: "opt_out_remove", label: "הסר" });
-
-  // TV → Internet
-  b.link(tv.route, inet.speak, { intentId: "provide_tv_count", label: "מספר טלוויזיות" });
-  b.link(tv.route, tv.speak, { intentId: "silence", label: "שתיקה" });
-  b.link(tv.route, tv.speak, { intentId: "greeting_ack", label: "המשך" });
-  b.link(tv.route, tv.speak, { isDefault: true, label: "חזרה על שאלה" });
-  b.link(tv.route, "goodbye_blacklist", { intentId: "opt_out_remove", label: "הסר" });
+  // Opening (includes TV question) → Internet
+  b.link(tvRoute, inet.speak, { intentId: "provide_tv_count", label: "מספר טלוויזיות" });
+  b.link(tvRoute, inet.speak, { isDefault: true, label: "ברירת מחדל" });
 
   // Internet branches
   b.link(inet.route, address.speak, { intentId: "internet_regular", label: "רגיל" });
@@ -221,7 +204,14 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   b.link(address.route, address.speak, { isDefault: true, label: "חזרה על שאלה" });
   b.link(address.route, "goodbye_blacklist", { intentId: "opt_out_remove", label: "הסר" });
 
-  // After fiber check announcement → speed
+  // Informational announcements chain directly to the next question (no listen wait)
+  b.link(fiberYes.speak, speedFiber.speak);
+  b.link(fiberNo.speak, speedReg.speak);
+  b.link(fiberExists.speak, speedFiber.speak);
+  b.link(noInet.speak, provider.speak);
+  b.link(summary.speak, callback.speak);
+
+  // Legacy route edges (unused when auto-chain is active; kept for builder compatibility)
   b.link(fiberYes.route, speedFiber.speak, { intentId: "greeting_ack", label: "המשך" });
   b.link(fiberYes.route, speedFiber.speak, { intentId: "silence", label: "שתיקה" });
   b.link(fiberYes.route, speedFiber.speak, { isDefault: true });
@@ -286,7 +276,7 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   b.link("goodbye_blacklist", "end_blacklist");
 
   return enhanceSigalGraph({
-    startNodeId: opening.speak,
+    startNodeId: openingSpeak,
     nodes: b.nodes,
     edges: b.edges,
     variables: [{ name: "NumOfTVs", type: "int", defaultValue: 0 }],
@@ -387,6 +377,41 @@ const DEFAULT_FLOW_VARIABLES: Record<string, FlowVariableDef> = {
   CustomerAddress: { name: "CustomerAddress", type: "string", defaultValue: "" },
 };
 
+const TV_COUNT_CANONICAL = "NumOfTVs";
+const TV_COUNT_ALIASES = new Set(["numOfTVs", "numoftvs"]);
+
+/** Collapse accidental duplicate TV-count variables (e.g. numOfTVs + NumOfTVs) into NumOfTVs. */
+export function patchConsolidateTvVariables(graph: FlowGraph): FlowGraph {
+  const variables = graph.variables ?? [];
+  const hasAlias = variables.some((v) => TV_COUNT_ALIASES.has(v.name));
+  if (!hasAlias) return graph;
+
+  const nextVariables = variables.filter((v) => !TV_COUNT_ALIASES.has(v.name));
+  if (!nextVariables.some((v) => v.name === TV_COUNT_CANONICAL)) {
+    nextVariables.push(DEFAULT_FLOW_VARIABLES.NumOfTVs);
+  }
+
+  const variableBindings = (graph.variableBindings ?? []).map((b) =>
+    TV_COUNT_ALIASES.has(b.variableName) ? { ...b, variableName: TV_COUNT_CANONICAL } : b,
+  );
+
+  const nodes = graph.nodes.map((n) => {
+    if (n.type !== "speak") return n;
+    let text = n.text;
+    for (const alias of TV_COUNT_ALIASES) {
+      text = text.replaceAll(`{{${alias}}}`, `{{${TV_COUNT_CANONICAL}}}`);
+    }
+    return text === n.text ? n : { ...n, text };
+  });
+
+  const edges = graph.edges.map((e) => {
+    if (!e.condition?.variable || !TV_COUNT_ALIASES.has(e.condition.variable)) return e;
+    return { ...e, condition: { ...e.condition, variable: TV_COUNT_CANONICAL } };
+  });
+
+  return { ...graph, variables: nextVariables, variableBindings, nodes, edges };
+}
+
 function defaultVariableDef(name: string): FlowVariableDef {
   return (
     DEFAULT_FLOW_VARIABLES[name] ?? {
@@ -415,8 +440,11 @@ export function ensureFlowVariables(graph: FlowGraph): FlowVariableDef[] {
   if (graph.nodes.some((n) => n.id === "listen_address")) {
     ensure("CustomerAddress");
   }
-  if (graph.nodes.some((n) => n.id === "listen_tv")) {
-    ensure("NumOfTVs");
+  const hasTvVariable = variables.some(
+    (v) => v.name === TV_COUNT_CANONICAL || TV_COUNT_ALIASES.has(v.name),
+  );
+  if (graph.nodes.some((n) => n.id === "listen_tv") && !hasTvVariable) {
+    ensure(TV_COUNT_CANONICAL);
   }
 
   if (variables.length === 0) {
@@ -432,6 +460,63 @@ function speakRepeatTarget(routeId: string, outgoing: FlowEdge[]): string | unde
   const stageSpeak = `speak_${stage}`;
   if (outgoing.some((e) => e.target === stageSpeak)) return stageSpeak;
   return outgoing.find((e) => e.target.startsWith("speak_") && e.target !== "speak_hi")?.target;
+}
+
+/** Announcement speaks that should chain to the next question without waiting for customer input. */
+const AUTO_ADVANCE_SPEAK_TARGETS: Record<string, string> = {
+  speak_fiber_yes: "speak_speed_fiber",
+  speak_fiber_no: "speak_speed_reg",
+  speak_fiber_exists: "speak_speed_fiber",
+  speak_no_inet: "speak_provider",
+  speak_summary: "speak_callback",
+};
+
+export function patchSigalAutoAdvanceSpeaks(graph: FlowGraph): FlowGraph {
+  if (!isSigalMiniFlowGraph(graph)) return graph;
+
+  let edges = [...graph.edges];
+  let nodes = graph.nodes.map((node) => {
+    if (node.type !== "speak" || !AUTO_ADVANCE_SPEAK_TARGETS[node.id]) return node;
+    return { ...node, autoAdvance: true };
+  });
+
+  const orphanIds = new Set<string>();
+
+  for (const [speakId, targetId] of Object.entries(AUTO_ADVANCE_SPEAK_TARGETS)) {
+    if (!nodes.some((n) => n.id === speakId) || !nodes.some((n) => n.id === targetId)) continue;
+
+    const suffix = speakId.replace(/^speak_/, "");
+    const listenId = `listen_${suffix}`;
+    const routeId = `route_${suffix}`;
+
+    edges = edges.filter(
+      (e) => !(e.source === speakId && (e.target === listenId || e.target === routeId)),
+    );
+
+    const otherSpeakOut = edges.filter(
+      (e) => e.source === speakId && e.target.startsWith("speak_") && e.target !== targetId,
+    );
+    if (otherSpeakOut.length > 0) {
+      edges = edges.filter((e) => !otherSpeakOut.includes(e));
+    }
+
+    if (!edges.some((e) => e.source === speakId && e.target === targetId)) {
+      edges.push({
+        id: `e_auto_${speakId}_${targetId}`,
+        source: speakId,
+        target: targetId,
+        label: "המשך אוטומטי",
+      });
+    }
+
+    orphanIds.add(listenId);
+    orphanIds.add(routeId);
+  }
+
+  edges = edges.filter((e) => !orphanIds.has(e.source) && !orphanIds.has(e.target));
+  nodes = nodes.filter((n) => !orphanIds.has(n.id));
+
+  return { ...graph, nodes, edges };
 }
 
 /** Fix corrupted defaults (e.g. blacklist as default) and clean up greeting routing. */
@@ -533,7 +618,9 @@ export function patchSigalGraphRouting(graph: FlowGraph): FlowGraph {
 }
 
 export function enhanceSigalGraph(graph: FlowGraph): FlowGraph {
-  return patchSigalFlowVariables(patchSigalGraphRouting(graph));
+  return patchSigalFlowVariables(
+    patchConsolidateTvVariables(patchSigalAutoAdvanceSpeaks(patchSigalGraphRouting(graph))),
+  );
 }
 
 export function isSigalMiniFlowGraph(graph: FlowGraph): boolean {

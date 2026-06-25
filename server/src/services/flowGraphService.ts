@@ -2,6 +2,7 @@ import { prisma } from "../db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { validateFlowGraph } from "../flow/graphValidation.js";
 import { createSigalMiniFlowGraph, enhanceSigalGraph, isSigalMiniFlowGraph, STAGED_OPENING } from "../flow/sigalMiniFlow.js";
+import { normalizeFlowGraph } from "../flow/graphFlowEngine.js";
 import {
   SIGAL_OPENING,
   SIGAL_QUALIFY,
@@ -160,7 +161,10 @@ export async function migrateToSigalMiniFlowIfNeeded(): Promise<void> {
     const existing = JSON.parse(json) as FlowGraph;
     const validMini =
       isSigalMiniFlowGraph(existing) && validateFlowGraph(existing).length === 0;
-    if (validMini) return;
+    if (validMini) {
+      await patchActiveFlowEnhancements();
+      return;
+    }
   }
 
   const graph = createSigalMiniFlowGraph();
@@ -172,6 +176,34 @@ export async function migrateToSigalMiniFlowIfNeeded(): Promise<void> {
       publishedGraphJson: JSON.stringify(graph),
       draftGraphJson: JSON.stringify(graph),
       graphPublishedAt: new Date(),
+    },
+  });
+}
+
+/** Re-apply graph enhancements (auto-advance speaks, bindings, etc.) to the active published flow. */
+export async function patchActiveFlowEnhancements(): Promise<void> {
+  const active = await prisma.callFlow.findFirst({
+    where: { isActive: true },
+    orderBy: { version: "desc" },
+  });
+  if (!active) return;
+
+  const raw =
+    active.publishedGraphJson !== "{}" ? active.publishedGraphJson : active.draftGraphJson;
+  if (!raw || raw === "{}") return;
+
+  const parsed = JSON.parse(raw) as FlowGraph;
+  if (!isSigalMiniFlowGraph(parsed)) return;
+
+  const enhanced = enhanceSigalGraph(normalizeFlowGraph(parsed));
+  const nextJson = JSON.stringify(enhanced);
+  if (nextJson === active.draftGraphJson && nextJson === active.publishedGraphJson) return;
+
+  await prisma.callFlow.update({
+    where: { id: active.id },
+    data: {
+      draftGraphJson: nextJson,
+      publishedGraphJson: nextJson,
     },
   });
 }
