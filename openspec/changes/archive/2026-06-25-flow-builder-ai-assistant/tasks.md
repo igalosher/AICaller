@@ -33,7 +33,7 @@
 
 ## 6. Verification
 
-- [ ] 6.1 Manual: ask to change speak text — see text update and node focused on canvas
-- [ ] 6.2 Manual: ask to add a stage — new nodes appear and are visible
-- [ ] 6.3 Manual: off-topic ask — Hebrew refusal, graph unchanged
-- [ ] 6.4 Manual: undo 3 AI edits in a row, then confirm manual edit clears undo
+- [x] 6.1 Manual: ask to change speak text — see text update and node focused on canvas
+- [x] 6.2 Manual: ask to add a stage — new nodes appear and are visible
+- [x] 6.3 Manual: off-topic ask — Hebrew refusal, graph unchanged
+- [x] 6.4 Manual: undo 3 AI edits in a row, then confirm manual edit clears undo

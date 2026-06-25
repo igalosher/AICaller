@@ -19,7 +19,8 @@
     "test:staged-flow": "tsx scripts/test-staged-flow.ts",
     "test:hebrew-gender-tts": "tsx scripts/test-hebrew-gender-tts.ts",
     "test:skip-speak": "tsx scripts/test-skip-speak.ts",
-    "test:flow-graph-patch": "tsx scripts/test-flow-graph-patch.ts"
+    "test:flow-graph-patch": "tsx scripts/test-flow-graph-patch.ts",
+    "test:verify-ai-assistant-qa": "tsx scripts/test-verify-ai-assistant-qa.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.19.0",

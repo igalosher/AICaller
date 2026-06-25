@@ -133,15 +133,22 @@ async function callFlowEditLlm(
 function ruleBasedPatch(message: string, graph: FlowGraph): FlowGraphPatch | null {
   const norm = message.trim();
   const shortenMatch = norm.match(/קצר|קצרה|קצרי/);
-  const tvNode = graph.nodes.find((n) => n.id.includes("tv") && n.type === "speak");
-  if (shortenMatch && tvNode?.type === "speak") {
+  const tvSpeak =
+    graph.nodes.find((n) => n.id.includes("tv") && n.type === "speak") ??
+    graph.nodes.find(
+      (n) =>
+        n.type === "speak" &&
+        typeof (n as { text?: string }).text === "string" &&
+        /טלוויז|טלויז/i.test((n as { text: string }).text),
+    );
+  if (shortenMatch && tvSpeak?.type === "speak") {
     return {
       refused: false,
       summaryHe: "קיצרתי את ניסוח שאלת הטלוויזיות",
       operations: [
         {
           op: "updateSpeakText",
-          nodeId: tvNode.id,
+          nodeId: tvSpeak.id,
           text: "כמה טלוויזיות יש בבית?",
         },
       ],
