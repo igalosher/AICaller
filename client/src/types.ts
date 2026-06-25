@@ -141,6 +141,7 @@ export interface TranscriptSegment {
   id: string;
   speaker: string;
   text: string;
+  flowNodeId?: string | null;
   timestamp: string;
   classification?: UtteranceClassification | null;
 }

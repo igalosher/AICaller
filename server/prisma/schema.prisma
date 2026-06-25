@@ -79,6 +79,7 @@ model CallTranscriptSegment {
   call           Call                     @relation(fields: [callId], references: [id], onDelete: Cascade)
   speaker        String
   text           String
+  flowNodeId     String?
   timestamp      DateTime                 @default(now())
   classification UtteranceClassification?
 }

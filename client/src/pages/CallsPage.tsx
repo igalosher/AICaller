@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { isAxiosError } from "axios";
 import { callsApi, connectCallEvents, intentsApi } from "../api";
 import { StatusBadge } from "../components/StatusBadge";
-import { TestCallAudio } from "../components/TestCallAudio";
+import { TestCallAudioPanel } from "../context/ActiveTestCallContext";
 import type { Call, TranscriptSegment } from "../types";
 import { contactDisplayName } from "../types";
 
@@ -22,6 +23,7 @@ type LiveSegment = {
   speaker: string;
   text: string;
   segmentId?: string;
+  flowNodeId?: string;
   intentId?: string;
   confidence?: number;
   classifier?: string;
@@ -37,6 +39,7 @@ function mergeTranscript(
     speaker: t.speaker,
     text: t.text,
     segmentId: t.id,
+    flowNodeId: t.flowNodeId ?? undefined,
     intentId: t.classification?.intentId,
     confidence: t.classification?.confidence,
     classifier: t.classification?.classifier,
@@ -122,6 +125,7 @@ export function CallsPage() {
         speaker?: string;
         text?: string;
         segmentId?: string;
+        flowNodeId?: string;
         intentId?: string;
         confidence?: number;
       };
@@ -131,7 +135,7 @@ export function CallsPage() {
           if (last?.speaker === e.speaker && last?.text === e.text) return prev;
           const key = segmentKey(e.speaker!, e.text!);
           if (prev.some((t) => segmentKey(t.speaker, t.text) === key)) return prev;
-          return [...prev, { speaker: e.speaker!, text: e.text! }];
+          return [...prev, { speaker: e.speaker!, text: e.text!, flowNodeId: e.flowNodeId }];
         });
       }
       if (e.type === "classification" && e.segmentId) {
@@ -225,7 +229,7 @@ export function CallsPage() {
           </div>
           {activeCall?.externalCallId?.startsWith("test-") && (
             <div className="mb-3">
-              <TestCallAudio callId={activeCall.id} />
+              <TestCallAudioPanel />
             </div>
           )}
           <p className="text-sm">
@@ -237,6 +241,16 @@ export function CallsPage() {
                 <p className="break-words">
                   <strong>{t.speaker === "ai" ? "AI" : "לקוח"}:</strong> {t.text}
                 </p>
+                {t.flowNodeId && (
+                  <div className="mt-1">
+                    <Link
+                      to={`/flow-builder?focus=${encodeURIComponent(t.flowNodeId)}`}
+                      className="text-xs text-blue-600 underline"
+                    >
+                      {t.speaker === "ai" ? "ערוך בזרימה" : "צומת האזנה בזרימה"}
+                    </Link>
+                  </div>
+                )}
                 {t.speaker === "customer" && t.intentId && (
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <span className="rounded-full bg-purple-100 px-2 py-0.5 text-xs text-purple-800">

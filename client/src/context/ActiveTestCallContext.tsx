@@ -1,6 +1,18 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
+import { useQuery } from "@tanstack/react-query";
+import { callsApi } from "../api";
 
-type TestCallStatus = "connecting" | "ready" | "ended" | "error";
+type TestCallStatus = "idle" | "connecting" | "ready" | "ended" | "error";
 
 type ServerMessage =
   | { type: "ready" }
@@ -10,20 +22,65 @@ type ServerMessage =
   | { type: "hangup" }
   | { type: "error"; message: string };
 
-type Props = {
-  callId: string;
+type ActiveTestCallContextValue = {
+  callId: string | null;
+  isTestCallActive: boolean;
+  status: TestCallStatus;
+  error: string | null;
+  reply: string;
+  setReply: (value: string) => void;
+  sending: boolean;
+  isPlaying: boolean;
+  sendReply: () => void;
+  skipSpeak: () => void;
 };
 
-export function TestCallAudio({ callId }: Props) {
-  const [status, setStatus] = useState<TestCallStatus>("connecting");
+const ActiveTestCallContext = createContext<ActiveTestCallContextValue | null>(null);
+
+export function useActiveTestCall(): ActiveTestCallContextValue {
+  const ctx = useContext(ActiveTestCallContext);
+  if (!ctx) {
+    return {
+      callId: null,
+      isTestCallActive: false,
+      status: "idle",
+      error: null,
+      reply: "",
+      setReply: () => {},
+      sending: false,
+      isPlaying: false,
+      sendReply: () => {},
+      skipSpeak: () => {},
+    };
+  }
+  return ctx;
+}
+
+export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
+  const { data: activeCall } = useQuery({
+    queryKey: ["activeCall"],
+    queryFn: callsApi.active,
+    refetchInterval: 2000,
+  });
+
+  const testCallId =
+    activeCall?.externalCallId?.startsWith("test-") &&
+    (activeCall.status === "connected" ||
+      activeCall.status === "dialing" ||
+      activeCall.status === "ringing")
+      ? activeCall.id
+      : null;
+
+  const [status, setStatus] = useState<TestCallStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [reply, setReply] = useState("");
   const [sending, setSending] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const playbackSourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const endedRef = useRef(false);
+  const intentionalCloseRef = useRef(false);
 
   const stopPlayback = useCallback(() => {
     playbackSourceRef.current?.stop();
@@ -35,10 +92,49 @@ export function TestCallAudio({ callId }: Props) {
     playbackSourceRef.current = null;
     setIsPlaying(false);
     setSending(false);
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "playback_done" }));
+    }
   }, []);
 
+  const skipSpeak = useCallback(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !isPlaying) return;
+    stopPlayback();
+    setSending(false);
+    ws.send(JSON.stringify({ type: "skip_speak" }));
+  }, [isPlaying, stopPlayback]);
+
+  const sendReply = useCallback(() => {
+    const text = reply.trim();
+    const ws = wsRef.current;
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN || sending || status !== "ready") return;
+    setSending(true);
+    ws.send(JSON.stringify({ type: "text", text }));
+    setReply("");
+  }, [reply, sending, status]);
+
   useEffect(() => {
+    if (!testCallId) {
+      intentionalCloseRef.current = true;
+      stopPlayback();
+      void audioCtxRef.current?.close();
+      audioCtxRef.current = null;
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.close();
+      }
+      wsRef.current = null;
+      setStatus("idle");
+      setError(null);
+      setSending(false);
+      setIsPlaying(false);
+      return;
+    }
+
+    intentionalCloseRef.current = false;
     let cancelled = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
     const cleanup = () => {
       stopPlayback();
@@ -73,15 +169,17 @@ export function TestCallAudio({ callId }: Props) {
       setIsPlaying(true);
     }
 
-    let connectTimer: ReturnType<typeof setTimeout> | undefined;
-
     async function connect() {
+      if (cancelled) return;
+      setStatus("connecting");
+      setError(null);
+
       try {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const ws = new WebSocket(`${protocol}//${window.location.host}/ws/test-call?callId=${callId}`);
+        const ws = new WebSocket(`${protocol}//${window.location.host}/ws/test-call?callId=${testCallId}`);
         wsRef.current = ws;
 
-        connectTimer = setTimeout(() => {
+        const connectTimer = setTimeout(() => {
           if (!cancelled && ws.readyState !== WebSocket.OPEN) {
             setError("תם הזמן לחיבור — ודאו שהשרת רץ");
             setStatus("error");
@@ -96,7 +194,7 @@ export function TestCallAudio({ callId }: Props) {
         ws.onmessage = (event) => {
           const msg = JSON.parse(event.data as string) as ServerMessage;
           if (msg.type === "ready") {
-            if (connectTimer) clearTimeout(connectTimer);
+            clearTimeout(connectTimer);
             setStatus("ready");
             setSending(false);
             return;
@@ -114,7 +212,7 @@ export function TestCallAudio({ callId }: Props) {
             return;
           }
           if (msg.type === "hangup") {
-            endedRef.current = true;
+            intentionalCloseRef.current = true;
             setStatus("ended");
             finishPlayback();
             cleanup();
@@ -138,11 +236,12 @@ export function TestCallAudio({ callId }: Props) {
         };
 
         ws.onclose = () => {
-          if (!cancelled && !endedRef.current) {
-            setStatus("ended");
-            setSending(false);
-            setIsPlaying(false);
-          }
+          clearTimeout(connectTimer);
+          if (cancelled || intentionalCloseRef.current) return;
+          setStatus("connecting");
+          reconnectTimer = setTimeout(() => {
+            void connect();
+          }, 1000);
         };
       } catch (err) {
         if (!cancelled) {
@@ -156,27 +255,44 @@ export function TestCallAudio({ callId }: Props) {
 
     return () => {
       cancelled = true;
-      if (connectTimer) clearTimeout(connectTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      intentionalCloseRef.current = true;
       cleanup();
     };
-  }, [callId, finishPlayback, stopPlayback]);
+  }, [testCallId, finishPlayback, stopPlayback]);
 
-  const skipSpeak = () => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN || !isPlaying) return;
-    stopPlayback();
-    setSending(false);
-    ws.send(JSON.stringify({ type: "skip_speak" }));
+  const value: ActiveTestCallContextValue = {
+    callId: testCallId,
+    isTestCallActive: Boolean(testCallId),
+    status,
+    error,
+    reply,
+    setReply,
+    sending,
+    isPlaying,
+    sendReply,
+    skipSpeak,
   };
 
-  const sendReply = () => {
-    const text = reply.trim();
-    const ws = wsRef.current;
-    if (!text || !ws || ws.readyState !== WebSocket.OPEN || sending || status !== "ready") return;
-    setSending(true);
-    ws.send(JSON.stringify({ type: "text", text }));
-    setReply("");
-  };
+  return (
+    <ActiveTestCallContext.Provider value={value}>{children}</ActiveTestCallContext.Provider>
+  );
+}
+
+export function TestCallAudioPanel({ showWhenIdle = false }: { showWhenIdle?: boolean }) {
+  const {
+    isTestCallActive,
+    status,
+    error,
+    reply,
+    setReply,
+    sending,
+    isPlaying,
+    sendReply,
+    skipSpeak,
+  } = useActiveTestCall();
+
+  if (!isTestCallActive && !showWhenIdle) return null;
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -191,6 +307,7 @@ export function TestCallAudio({ callId }: Props) {
   };
 
   const statusLabel: Record<TestCallStatus, string> = {
+    idle: "אין שיחת טסט פעילה",
     connecting: "מתחבר לשיחת הטסט...",
     ready: "שיחת טסט פעילה — הקלידו תשובה ולחצו Enter",
     ended: "שיחת הטסט הסתיימה",
@@ -219,7 +336,7 @@ export function TestCallAudio({ callId }: Props) {
             דלג לסוף
           </button>
           <p className="text-xs text-emerald-700">
-            עוצר את הדיבור בלבד — לא שולח תשובת לקוח (שונה מלשלוח הודעה בזמן השמעה).
+            עוצר את הדיבור בלבד — לא שולח תשובת לקוח.
           </p>
         </div>
       )}
@@ -233,7 +350,6 @@ export function TestCallAudio({ callId }: Props) {
             onChange={(e) => setReply(e.target.value)}
             onKeyDown={onKeyDown}
             disabled={sending}
-            autoFocus
             dir="rtl"
           />
           <button

@@ -18,7 +18,7 @@ const STAGED_INET = `הבנתי שיש לך {{NumOfTVs}} טלויזיות בבי
 איזו תשתית אינטרנט יש לך בבית? רגיל, סיבים או לא ידוע?`;
 
 export const OPT_OUT_GOODBYE = "תודה רבה ויום נעים";
-export const LEAD_GOODBYE = "מעולה, נציג יחזור אלייך בהקדם. יום נעים!";
+export const LEAD_GOODBYE = "נהדר, נציג שלנו יתקשר בקרוב לקבלת פרטים.";
 export const POLITE_GOODBYE = "תודה רבה על הזמן. יום נעים!";
 
 type Pos = { x: number; y: number };
@@ -148,6 +148,12 @@ export function createSigalMiniFlowGraph(): FlowGraph {
     "כמה {{g:אתה משלם|את משלמת}} היום על החבילה שלך?",
     { x, y },
   );
+  b.nodes.push({
+    id: "decide_price",
+    type: "decision",
+    label: "יש תשובת מחיר?",
+    position: { x, y: y + 240 },
+  });
   y += dy;
   const offer = b.stage(
     "offer",
@@ -177,6 +183,12 @@ export function createSigalMiniFlowGraph(): FlowGraph {
     "{{g:תרצה|תרצי}} שאחד הנציגים שלנו יחזור {{g:אליך|אליך}} לתיאום התקנה?",
     { x, y },
   );
+  b.nodes.push({
+    id: "decide_callback",
+    type: "decision",
+    label: "תשובת שיחה חוזרת",
+    position: { x, y: y + 240 },
+  });
 
   b.speak("goodbye_blacklist", "פרידה הסר", OPT_OUT_GOODBYE, { x: x - 400, y: 200 });
   b.speak("goodbye_lead", "פרידה ליד", LEAD_GOODBYE, { x: x + 200, y: y + 80 });
@@ -248,8 +260,16 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   b.link(provider.route, provider.speak, { isDefault: true, label: "חזרה על שאלה" });
 
   b.link(price.route, offer.speak, { intentId: "provide_current_price" });
+  b.link(price.route, offer.speak, { intentId: "ask_options_compare", label: "השוואת אפשרויות" });
+  b.link(price.route, offer.speak, { intentId: "price_objection", label: "התנגדות מחיר" });
+  b.link(price.route, offer.speak, { intentId: "greeting_ack", label: "אישור" });
+  b.link(price.route, "decide_price", { isDefault: true, label: "בדיקת תשובה" });
   b.link(price.route, price.speak, { intentId: "silence", label: "שתיקה" });
-  b.link(price.route, price.speak, { isDefault: true, label: "חזרה על שאלה" });
+  b.link("decide_price", offer.speak, {
+    condition: { op: "var_not_empty", variable: "PriceAnswerText" },
+    label: "יש תשובה",
+  });
+  b.link("decide_price", price.speak, { isDefault: true, label: "חזרה על שאלה" });
 
   b.link(offer.route, addons.speak, { intentId: "agree_purchase" });
   b.link(offer.route, addons.speak, { intentId: "greeting_ack" });
@@ -265,11 +285,28 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   b.link(summary.route, callback.speak, { intentId: "silence" });
   b.link(summary.route, callback.speak, { isDefault: true });
 
-  b.link(callback.route, "goodbye_lead", { intentId: "agree_callback" });
-  b.link(callback.route, "goodbye_polite", { intentId: "decline_callback" });
+  b.link(callback.route, "goodbye_lead", { intentId: "agree_callback", label: "כן לשיחה חוזרת" });
+  b.link(callback.route, "goodbye_lead", { intentId: "greeting_ack", label: "כן" });
+  b.link(callback.route, "goodbye_lead", { intentId: "agree_purchase", label: "מסכים" });
+  b.link(callback.route, "goodbye_polite", { intentId: "decline_callback", label: "לא לשיחה חוזרת" });
+  b.link(callback.route, "goodbye_polite", { intentId: "not_interested", label: "לא מעוניין" });
+  b.link(callback.route, "goodbye_polite", { intentId: "decline_addons", label: "לא תודה" });
+  b.link(callback.route, "decide_callback", { isDefault: true, label: "בדיקת תשובה" });
   b.link(callback.route, callback.speak, { intentId: "silence", label: "שתיקה" });
-  b.link(callback.route, callback.speak, { isDefault: true, label: "חזרה על שאלה" });
   b.link(callback.route, "goodbye_blacklist", { intentId: "opt_out_remove" });
+  b.link("decide_callback", "goodbye_lead", {
+    condition: { op: "var_eq", variable: "CallbackAnswerText", literal: "כן" },
+    label: "כן",
+  });
+  b.link("decide_callback", "goodbye_polite", {
+    condition: { op: "var_eq", variable: "CallbackAnswerText", literal: "לא" },
+    label: "לא",
+  });
+  b.link("decide_callback", "goodbye_polite", {
+    condition: { op: "var_eq", variable: "CallbackAnswerText", literal: "לא תודה" },
+    label: "לא תודה",
+  });
+  b.link("decide_callback", callback.speak, { isDefault: true, label: "חזרה על שאלה" });
 
   b.link("goodbye_lead", "end_callback");
   b.link("goodbye_polite", "end_refused");
@@ -279,7 +316,19 @@ export function createSigalMiniFlowGraph(): FlowGraph {
     startNodeId: openingSpeak,
     nodes: b.nodes,
     edges: b.edges,
-    variables: [{ name: "NumOfTVs", type: "int", defaultValue: 0 }],
+    interruptQa: false,
+    variables: [
+      { name: "NumOfTVs", type: "int", defaultValue: 0 },
+      { name: "MonthlyPrice", type: "int", defaultValue: 0 },
+      { name: "PriceAnswerText", type: "string", defaultValue: "" },
+      { name: "CallbackAnswerText", type: "string", defaultValue: "" },
+    ],
+    variableBindings: [
+      { listenNodeId: "listen_tv", variableName: "NumOfTVs", source: "entity" },
+      { listenNodeId: "listen_price", variableName: "PriceAnswerText", source: "raw_text" },
+      { listenNodeId: "listen_price", variableName: "MonthlyPrice", source: "entity", path: "monthly_price" },
+      { listenNodeId: "listen_callback", variableName: "CallbackAnswerText", source: "raw_text" },
+    ],
     lookupTables: [
       {
         name: "Channels",
@@ -369,12 +418,41 @@ function mergeAddressBinding(graph: FlowGraph): FlowVariableBinding[] {
       source: "raw_text",
     });
   }
+  if (graph.nodes.some((n) => n.id === "listen_price")) {
+    if (!bindings.some((b) => b.listenNodeId === "listen_price" && b.variableName === "PriceAnswerText")) {
+      bindings.push({
+        listenNodeId: "listen_price",
+        variableName: "PriceAnswerText",
+        source: "raw_text",
+      });
+    }
+    if (!bindings.some((b) => b.listenNodeId === "listen_price" && b.variableName === "MonthlyPrice")) {
+      bindings.push({
+        listenNodeId: "listen_price",
+        variableName: "MonthlyPrice",
+        source: "entity",
+        path: "monthly_price",
+      });
+    }
+  }
+  if (graph.nodes.some((n) => n.id === "listen_callback")) {
+    if (!bindings.some((b) => b.listenNodeId === "listen_callback" && b.variableName === "CallbackAnswerText")) {
+      bindings.push({
+        listenNodeId: "listen_callback",
+        variableName: "CallbackAnswerText",
+        source: "raw_text",
+      });
+    }
+  }
   return bindings;
 }
 
 const DEFAULT_FLOW_VARIABLES: Record<string, FlowVariableDef> = {
   NumOfTVs: { name: "NumOfTVs", type: "int", defaultValue: 0 },
   CustomerAddress: { name: "CustomerAddress", type: "string", defaultValue: "" },
+  MonthlyPrice: { name: "MonthlyPrice", type: "int", defaultValue: 0 },
+  PriceAnswerText: { name: "PriceAnswerText", type: "string", defaultValue: "" },
+  CallbackAnswerText: { name: "CallbackAnswerText", type: "string", defaultValue: "" },
 };
 
 const TV_COUNT_CANONICAL = "NumOfTVs";
@@ -446,9 +524,22 @@ export function ensureFlowVariables(graph: FlowGraph): FlowVariableDef[] {
   if (graph.nodes.some((n) => n.id === "listen_tv") && !hasTvVariable) {
     ensure(TV_COUNT_CANONICAL);
   }
+  if (graph.nodes.some((n) => n.id === "listen_price")) {
+    ensure("MonthlyPrice");
+    ensure("PriceAnswerText");
+  }
+  if (graph.nodes.some((n) => n.id === "listen_callback")) {
+    ensure("CallbackAnswerText");
+  }
 
   if (variables.length === 0) {
-    return [DEFAULT_FLOW_VARIABLES.NumOfTVs, DEFAULT_FLOW_VARIABLES.CustomerAddress];
+    return [
+      DEFAULT_FLOW_VARIABLES.NumOfTVs,
+      DEFAULT_FLOW_VARIABLES.CustomerAddress,
+      DEFAULT_FLOW_VARIABLES.MonthlyPrice,
+      DEFAULT_FLOW_VARIABLES.PriceAnswerText,
+      DEFAULT_FLOW_VARIABLES.CallbackAnswerText,
+    ];
   }
   return variables;
 }
@@ -617,9 +708,195 @@ export function patchSigalGraphRouting(graph: FlowGraph): FlowGraph {
   return { ...graph, nodes, edges };
 }
 
+/** After price question: advance on any spoken answer (e.g. bare "200"), not only classified provide_current_price. */
+export function patchSigalPriceRouting(graph: FlowGraph): FlowGraph {
+  if (!isSigalMiniFlowGraph(graph)) return graph;
+  if (!graph.nodes.some((n) => n.id === "route_price")) return graph;
+
+  let nodes = [...graph.nodes];
+  let edges = [...graph.edges];
+
+  if (!nodes.some((n) => n.id === "decide_price")) {
+    const routePrice = nodes.find((n) => n.id === "route_price");
+    const pos = routePrice?.position ?? { x: 320, y: 880 };
+    nodes.push({
+      id: "decide_price",
+      type: "decision",
+      label: "יש תשובת מחיר?",
+      position: { x: pos.x, y: (pos.y ?? 0) + 80 },
+    });
+  }
+
+  const offerIntents: Array<{ intentId: string; label: string }> = [
+    { intentId: "provide_current_price", label: "מחיר נוכחי" },
+    { intentId: "ask_options_compare", label: "השוואת אפשרויות" },
+    { intentId: "price_objection", label: "התנגדות מחיר" },
+    { intentId: "greeting_ack", label: "אישור" },
+  ];
+  for (const { intentId, label } of offerIntents) {
+    if (!edges.some((e) => e.source === "route_price" && e.intentId === intentId)) {
+      edges.push({
+        id: `e_route_price_${intentId}`,
+        source: "route_price",
+        target: "speak_offer",
+        intentId,
+        label,
+      });
+    }
+  }
+
+  edges = edges.filter(
+    (e) => !(e.source === "route_price" && e.isDefault && e.target === "speak_price"),
+  );
+  if (!edges.some((e) => e.source === "route_price" && e.isDefault)) {
+    edges.push({
+      id: "e_route_price_default_decide",
+      source: "route_price",
+      target: "decide_price",
+      isDefault: true,
+      label: "בדיקת תשובה",
+    });
+  } else {
+    edges = edges.map((e) =>
+      e.source === "route_price" && e.isDefault
+        ? { ...e, target: "decide_price", label: e.label ?? "בדיקת תשובה" }
+        : e,
+    );
+  }
+
+  edges = edges.filter((e) => e.source !== "decide_price");
+  edges.push(
+    {
+      id: "e_decide_price_has_answer",
+      source: "decide_price",
+      target: "speak_offer",
+      label: "יש תשובה",
+      condition: { op: "var_not_empty", variable: "PriceAnswerText" },
+    },
+    {
+      id: "e_decide_price_repeat",
+      source: "decide_price",
+      target: "speak_price",
+      isDefault: true,
+      label: "חזרה על שאלה",
+    },
+  );
+
+  const withBindings = patchSigalFlowVariables({ ...graph, nodes, edges, interruptQa: false });
+  const variables = (withBindings.variables ?? []).map((v) =>
+    v.name === "MonthlyPrice" ? { ...v, type: "int" as const, defaultValue: 0 } : v,
+  );
+  return { ...withBindings, variables };
+}
+
+/** Callback yes/no: "כן" is classified as greeting_ack, not agree_callback — route both to goodbye_lead. */
+export function patchSigalCallbackRouting(graph: FlowGraph): FlowGraph {
+  if (!isSigalMiniFlowGraph(graph)) return graph;
+  if (!graph.nodes.some((n) => n.id === "route_callback")) return graph;
+
+  let nodes = graph.nodes.map((n) =>
+    n.id === "goodbye_lead" && n.type === "speak"
+      ? { ...n, text: LEAD_GOODBYE, label: n.label ?? "פרידה ליד" }
+      : n,
+  );
+  let edges = [...graph.edges];
+
+  if (!nodes.some((n) => n.id === "decide_callback")) {
+    const routeCallback = nodes.find((n) => n.id === "route_callback");
+    const pos = routeCallback?.position ?? { x: 320, y: 1320 };
+    nodes.push({
+      id: "decide_callback",
+      type: "decision",
+      label: "תשובת שיחה חוזרת",
+      position: { x: pos.x, y: (pos.y ?? 0) + 80 },
+    });
+  }
+
+  const ensureRoute = (intentId: string, target: string, label: string) => {
+    const existing = edges.find((e) => e.source === "route_callback" && e.intentId === intentId);
+    if (existing) {
+      edges = edges.map((e) =>
+        e.source === "route_callback" && e.intentId === intentId ? { ...e, target, label } : e,
+      );
+    } else {
+      edges.push({
+        id: `e_route_callback_${intentId}`,
+        source: "route_callback",
+        target,
+        intentId,
+        label,
+      });
+    }
+  };
+
+  ensureRoute("agree_callback", "goodbye_lead", "כן לשיחה חוזרת");
+  ensureRoute("greeting_ack", "goodbye_lead", "כן");
+  ensureRoute("agree_purchase", "goodbye_lead", "מסכים");
+  ensureRoute("decline_callback", "goodbye_polite", "לא לשיחה חוזרת");
+  ensureRoute("not_interested", "goodbye_polite", "לא מעוניין");
+  ensureRoute("decline_addons", "goodbye_polite", "לא תודה");
+
+  edges = edges.filter(
+    (e) => !(e.source === "route_callback" && e.isDefault && e.target === "speak_callback"),
+  );
+  if (!edges.some((e) => e.source === "route_callback" && e.isDefault)) {
+    edges.push({
+      id: "e_route_callback_default_decide",
+      source: "route_callback",
+      target: "decide_callback",
+      isDefault: true,
+      label: "בדיקת תשובה",
+    });
+  } else {
+    edges = edges.map((e) =>
+      e.source === "route_callback" && e.isDefault
+        ? { ...e, target: "decide_callback", label: e.label ?? "בדיקת תשובה" }
+        : e,
+    );
+  }
+
+  edges = edges.filter((e) => e.source !== "decide_callback");
+  edges.push(
+    {
+      id: "e_decide_callback_yes",
+      source: "decide_callback",
+      target: "goodbye_lead",
+      label: "כן",
+      condition: { op: "var_eq", variable: "CallbackAnswerText", literal: "כן" },
+    },
+    {
+      id: "e_decide_callback_no",
+      source: "decide_callback",
+      target: "goodbye_polite",
+      label: "לא",
+      condition: { op: "var_eq", variable: "CallbackAnswerText", literal: "לא" },
+    },
+    {
+      id: "e_decide_callback_no_thanks",
+      source: "decide_callback",
+      target: "goodbye_polite",
+      label: "לא תודה",
+      condition: { op: "var_eq", variable: "CallbackAnswerText", literal: "לא תודה" },
+    },
+    {
+      id: "e_decide_callback_repeat",
+      source: "decide_callback",
+      target: "speak_callback",
+      isDefault: true,
+      label: "חזרה על שאלה",
+    },
+  );
+
+  return { ...graph, nodes, edges };
+}
+
 export function enhanceSigalGraph(graph: FlowGraph): FlowGraph {
   return patchSigalFlowVariables(
-    patchConsolidateTvVariables(patchSigalAutoAdvanceSpeaks(patchSigalGraphRouting(graph))),
+    patchConsolidateTvVariables(
+      patchSigalCallbackRouting(
+        patchSigalPriceRouting(patchSigalAutoAdvanceSpeaks(patchSigalGraphRouting(graph))),
+      ),
+    ),
   );
 }
 

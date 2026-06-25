@@ -1,5 +1,6 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { OpenAiBalanceBadge } from "./OpenAiBalanceBadge";
+import { ActiveTestCallProvider, useActiveTestCall } from "../context/ActiveTestCallContext";
 
 const nav = [
   { to: "/", label: "לוח בקרה" },
@@ -8,17 +9,39 @@ const nav = [
   { to: "/sales", label: "הגדרות מכירה" },
   { to: "/flow-builder", label: "בניית זרימה" },
   { to: "/intents", label: "ניהול כוונות" },
-  { to: "/call-flow", label: "זרימת שיחה" },
   { to: "/settings", label: "הגדרות" },
 ];
 
 export function Layout() {
+  return (
+    <ActiveTestCallProvider>
+      <LayoutShell />
+    </ActiveTestCallProvider>
+  );
+}
+
+function ActiveCallChip() {
+  const { isTestCallActive } = useActiveTestCall();
+  const location = useLocation();
+  if (!isTestCallActive || location.pathname === "/calls") return null;
+  return (
+    <NavLink
+      to="/calls"
+      className="rounded-full bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
+    >
+      שיחת טסט פעילה — חזרה לשיחות
+    </NavLink>
+  );
+}
+
+function LayoutShell() {
   return (
     <div className="min-h-screen">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-4">
           <h1 className="text-xl font-bold text-blue-700">YES AI Caller</h1>
           <div className="flex shrink-0 items-center gap-3">
+            <ActiveCallChip />
             <OpenAiBalanceBadge />
             <nav className="flex flex-wrap justify-end gap-2">
             {nav.map((item) => (

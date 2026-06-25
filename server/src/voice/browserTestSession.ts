@@ -6,19 +6,23 @@ import { synthesizeHebrewSpeechMp3, type TtsOptions } from "./tts.js";
 type SpeechHandler = (callId: string, text: string) => Promise<void>;
 type SessionStartHandler = (callId: string) => Promise<void>;
 type SessionEndHandler = (callId: string) => Promise<void>;
+type PlaybackIdleHandler = (callId: string) => void;
 
 let onCustomerSpeech: SpeechHandler = async () => {};
 let onSessionStart: SessionStartHandler = async () => {};
 let onSessionEnd: SessionEndHandler = async () => {};
+let onPlaybackIdle: PlaybackIdleHandler = () => {};
 
 export function registerBrowserTestHandlers(handlers: {
   onCustomerSpeech: SpeechHandler;
   onSessionStart: SessionStartHandler;
   onSessionEnd?: SessionEndHandler;
+  onPlaybackIdle?: PlaybackIdleHandler;
 }): void {
   onCustomerSpeech = handlers.onCustomerSpeech;
   onSessionStart = handlers.onSessionStart;
   onSessionEnd = handlers.onSessionEnd ?? (async () => {});
+  onPlaybackIdle = handlers.onPlaybackIdle ?? (() => {});
 }
 
 interface BrowserTestSession {
@@ -110,7 +114,8 @@ async function dispatchBrowserTestMessage(callId: string, data: WebSocket.RawDat
 type BrowserClientMessage =
   | { type: "start" }
   | { type: "text"; text: string }
-  | { type: "skip_speak" };
+  | { type: "skip_speak" }
+  | { type: "playback_done" };
 
 async function handleBrowserTestMessage(callId: string, message: BrowserClientMessage): Promise<void> {
   const session = sessions.get(callId);
@@ -133,6 +138,13 @@ async function handleBrowserTestMessage(callId: string, message: BrowserClientMe
     session.speaking = false;
     session.ws.send(JSON.stringify({ type: "stop_playback" }));
     session.ws.send(JSON.stringify({ type: "speak_skipped" }));
+    onPlaybackIdle(callId);
+    return;
+  }
+
+  if (message.type === "playback_done") {
+    session.speaking = false;
+    onPlaybackIdle(callId);
     return;
   }
 

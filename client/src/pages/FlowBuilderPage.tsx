@@ -19,6 +19,7 @@ import "@xyflow/react/dist/style.css";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { memo, useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useSearchParams } from "react-router-dom";
 import { callFlowsApi, intentsApi } from "../api";
 import type {
   FlowEdge,
@@ -64,6 +65,7 @@ function FlowNodeCard({ data }: { data: { label: string; nodeType: string; text?
 const MemoFlowNodeCard = memo(FlowNodeCard);
 
 let requestFitView: (() => void) | null = null;
+let requestFocusNode: ((nodeId: string) => void) | null = null;
 
 function FitViewController() {
   const { fitView } = useReactFlow();
@@ -71,9 +73,13 @@ function FitViewController() {
     requestFitView = () => {
       void fitView({ padding: 0.15, duration: 150 });
     };
+    requestFocusNode = (nodeId: string) => {
+      void fitView({ nodes: [{ id: nodeId }], padding: 0.35, duration: 200 });
+    };
     requestAnimationFrame(() => requestFitView?.());
     return () => {
       requestFitView = null;
+      requestFocusNode = null;
     };
   }, [fitView]);
   return null;
@@ -225,6 +231,8 @@ function reactFlowToGraph(
 }
 
 export function FlowBuilderPage() {
+  const [searchParams] = useSearchParams();
+  const focusParam = searchParams.get("focus");
   const qc = useQueryClient();
   const { data: flow } = useQuery({ queryKey: ["callFlow"], queryFn: callFlowsApi.active });
   const { data: intents } = useQuery({ queryKey: ["intents"], queryFn: intentsApi.list });
@@ -278,6 +286,18 @@ export function FlowBuilderPage() {
     setSideFlows(patched.sideFlows ?? []);
     setSelectedId(patched.startNodeId);
   }, [graph, setNodes, setEdges]);
+
+  useEffect(() => {
+    if (!focusParam || !graph || rawNodes.length === 0) return;
+    const exists = rawNodes.some((n) => n.id === focusParam);
+    if (!exists) {
+      setActionError(`צומת "${focusParam}" לא נמצא בזרימה`);
+      return;
+    }
+    setSelectedId(focusParam);
+    setSidebarTab("node");
+    requestAnimationFrame(() => requestFocusNode?.(focusParam));
+  }, [focusParam, graph, rawNodes]);
 
   const onConnect = useCallback(
     (connection: Connection) => setEdges((eds: Edge[]) => addEdge(connection, eds)),

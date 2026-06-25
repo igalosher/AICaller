@@ -2,7 +2,7 @@ import type { WebSocket } from "ws";
 
 export type CallEvent =
   | { type: "call_status"; callId: string; status: string; stage?: string }
-  | { type: "transcript"; callId: string; speaker: string; text: string }
+  | { type: "transcript"; callId: string; speaker: string; text: string; flowNodeId?: string }
   | {
       type: "classification";
       callId: string;
