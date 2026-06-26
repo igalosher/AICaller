@@ -1,10 +1,19 @@
 import { Router } from "express";
 import { z } from "zod";
 import {
+  approveAgentDraft,
+  createAgentDrafts,
+  discardAgentDraft,
+  listPendingAgentDrafts,
+} from "../services/agentDraftService.js";
+import {
   createAgentExample,
   deleteAgentExample,
   getAgentConfig,
+  getAgentVersion,
   listAgentExamples,
+  listAgentVersions,
+  restoreAgentVersion,
   saveAgentConfig,
 } from "../services/agentConfigService.js";
 
@@ -32,11 +41,87 @@ router.put("/config", async (req, res, next) => {
     const current = await getAgentConfig();
     res.json(
       await saveAgentConfig({
-        ...current,
-        ...body,
+        missionHe: body.missionHe,
+        limitsHe: body.limitsHe,
+        policiesHe: body.policiesHe,
+        openingTemplateHe: body.openingTemplateHe,
         maxRejections: body.maxRejections ?? current.maxRejections,
       }),
     );
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get("/versions", async (_req, res, next) => {
+  try {
+    res.json({ items: await listAgentVersions() });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get("/versions/:id", async (req, res, next) => {
+  try {
+    const version = await getAgentVersion(req.params.id);
+    if (!version) {
+      res.status(404).json({ error: "גרסה לא נמצאה" });
+      return;
+    }
+    res.json(version);
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post("/versions/:id/restore", async (req, res, next) => {
+  try {
+    res.json(await restoreAgentVersion(req.params.id));
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get("/drafts", async (_req, res, next) => {
+  try {
+    res.json({ items: await listPendingAgentDrafts() });
+  } catch (e) {
+    next(e);
+  }
+});
+
+const draftSchema = z.object({
+  customerText: z.string().optional(),
+  aiResponseBad: z.string().optional(),
+  correctedText: z.string().optional(),
+  configField: z.enum(["missionHe", "limitsHe", "policiesHe"]).optional(),
+  patchText: z.string().optional(),
+  callId: z.string().optional(),
+  segmentId: z.string().optional(),
+  operatorNote: z.string().optional(),
+});
+
+router.post("/drafts", async (req, res, next) => {
+  try {
+    const body = draftSchema.parse(req.body);
+    const items = await createAgentDrafts(body);
+    res.status(201).json({ items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post("/drafts/:id/approve", async (req, res, next) => {
+  try {
+    res.json(await approveAgentDraft(req.params.id));
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post("/drafts/:id/discard", async (req, res, next) => {
+  try {
+    res.json(await discardAgentDraft(req.params.id));
   } catch (e) {
     next(e);
   }

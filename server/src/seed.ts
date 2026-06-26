@@ -3,6 +3,7 @@ import { refreshProductKnowledge } from "./services/productKnowledge.js";
 import { ensureYesCatalogSeeded } from "./services/yesCatalogService.js";
 import { seedDefaultIntents } from "./services/intentService.js";
 import { migrateToSigalMiniFlowIfNeeded, patchActiveFlowEnhancements } from "./services/flowGraphService.js";
+import { backfillAgentConfigVersionIfEmpty, patchAgentConfigOutboundSalesIfNeeded } from "./services/agentConfigService.js";
 import { createSigalMiniFlowGraph, STAGED_OPENING } from "./flow/sigalMiniFlow.js";
 
 export async function runSeed() {
@@ -41,4 +42,19 @@ export async function runSeed() {
   }
 
   await refreshProductKnowledge();
+  await backfillAgentConfigVersionIfEmpty();
+  await patchAgentConfigOutboundSalesIfNeeded();
+}
+
+const isMain =
+  import.meta.url === new URL(process.argv[1] ?? "", "file:").href ||
+  process.argv[1]?.replace(/\\/g, "/").endsWith("/seed.ts");
+
+if (isMain) {
+  runSeed()
+    .then(() => prisma.$disconnect())
+    .catch((err) => {
+      console.error(err);
+      prisma.$disconnect().finally(() => process.exit(1));
+    });
 }

@@ -55,10 +55,29 @@ function printManualAbChecklist() {
   console.log("  female:", adaptHebrewTextForTts(SAMPLE, "female"));
 }
 
+function testSlashForms() {
+  assert.equal(
+    adaptHebrewTextForTts("אם אינך מעוניין/ת לשמוע", "male"),
+    "אם אֵינְךָ מְעוּנְיָן לשמוע",
+  );
+  assert.match(adaptHebrewTextForTts("אם אינך מעוניין/ת לשמוע", "female"), /מְעוּנְיֶנֶת/);
+  assert.match(adaptHebrewTextForTts("אם אינך מעוניין/ת לשמוע", "female"), /אֵינֵךְ/);
+  console.log("✓ slash forms מעוניין/ת + אינך");
+}
+
+function testGenderMarkersInTts() {
+  const tpl = "האם {{g:תרצה|תרצי}} לשמוע עוד?";
+  assert.match(adaptHebrewTextForTts(tpl, "male"), /תִּרְצֶה/);
+  assert.match(adaptHebrewTextForTts(tpl, "female"), /תִּרְצִי/);
+  console.log("✓ {{g:m|f}} resolved inside adaptHebrewTextForTts");
+}
+
 testHomographMale();
 testHomographFemale();
 testTranscriptUnchanged();
 testAllHomographs();
 testGenderMarkers();
+testSlashForms();
+testGenderMarkersInTts();
 printManualAbChecklist();
 console.log("\nAll automated hebrew-gender-tts checks passed.");

@@ -138,6 +138,33 @@ export const agentApi = {
   getConfig: () => api.get<import("./types").AgentConfig>("/agent/config").then((r) => r.data),
   saveConfig: (data: import("./types").AgentConfig) =>
     api.put<import("./types").AgentConfig>("/agent/config", data).then((r) => r.data),
+  listVersions: () =>
+    api
+      .get<{ items: import("./types").AgentConfigVersionSummary[] }>("/agent/versions")
+      .then((r) => r.data),
+  getVersion: (id: string) =>
+    api.get<import("./types").AgentConfigVersionDetail>(`/agent/versions/${id}`).then((r) => r.data),
+  restoreVersion: (id: string) =>
+    api.post<import("./types").AgentConfig>(`/agent/versions/${id}/restore`).then((r) => r.data),
+  listDrafts: () =>
+    api.get<{ items: import("./types").AgentInstructionDraft[] }>("/agent/drafts").then((r) => r.data),
+  createDraft: (data: {
+    customerText?: string;
+    aiResponseBad?: string;
+    correctedText?: string;
+    configField?: import("./types").AgentConfigPatchField;
+    patchText?: string;
+    callId?: string;
+    segmentId?: string;
+    operatorNote?: string;
+  }) =>
+    api
+      .post<{ items: import("./types").AgentInstructionDraft[] }>("/agent/drafts", data)
+      .then((r) => r.data),
+  approveDraft: (id: string) =>
+    api.post<import("./types").AgentInstructionDraft>(`/agent/drafts/${id}/approve`).then((r) => r.data),
+  discardDraft: (id: string) =>
+    api.post<import("./types").AgentInstructionDraft>(`/agent/drafts/${id}/discard`).then((r) => r.data),
   listExamples: () =>
     api.get<{ items: import("./types").AgentResponseExample[] }>("/agent/examples").then((r) => r.data),
   createExample: (data: {

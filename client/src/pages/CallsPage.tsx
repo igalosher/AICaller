@@ -5,7 +5,7 @@ import { isAxiosError } from "axios";
 import { callsApi, connectCallEvents, intentsApi, agentApi } from "../api";
 import { StatusBadge } from "../components/StatusBadge";
 import { TestCallAudioPanel } from "../context/ActiveTestCallContext";
-import type { Call, TranscriptSegment } from "../types";
+import type { Call, TranscriptSegment, AgentConfigPatchField } from "../types";
 import { contactDisplayName } from "../types";
 
 function getErrorMessage(err: unknown): string {
@@ -65,6 +65,10 @@ export function CallsPage() {
   const [correctSegment, setCorrectSegment] = useState<LiveSegment | null>(null);
   const [correctedText, setCorrectedText] = useState("");
   const [customerContext, setCustomerContext] = useState("");
+  const [configField, setConfigField] = useState<AgentConfigPatchField | "">("");
+  const [patchText, setPatchText] = useState("");
+  const [operatorNote, setOperatorNote] = useState("");
+  const [draftSavedMessage, setDraftSavedMessage] = useState<string | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
   const { data: calls } = useQuery({ queryKey: ["calls"], queryFn: callsApi.list });
@@ -91,6 +95,10 @@ export function CallsPage() {
     setCorrectSegment(segment);
     setCorrectedText(segment.text);
     setCustomerContext(priorCustomer?.text ?? "");
+    setConfigField("");
+    setPatchText("");
+    setOperatorNote("");
+    setDraftSavedMessage(null);
   };
 
   const displayTranscript = useMemo(
@@ -127,18 +135,25 @@ export function CallsPage() {
 
   const correctMutation = useMutation({
     mutationFn: () =>
-      agentApi.createExample({
-        customerText: customerContext.trim() || "(הקשר לא זמין)",
+      agentApi.createDraft({
+        customerText: customerContext.trim() || undefined,
         aiResponseBad: correctSegment!.text,
-        correctedText: correctedText.trim(),
+        correctedText: correctedText.trim() || undefined,
+        configField: configField || undefined,
+        patchText: patchText.trim() || undefined,
         callId: displayCall?.id,
         segmentId: correctSegment?.segmentId,
+        operatorNote: operatorNote.trim() || undefined,
       }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["agentExamples"] });
+      void qc.invalidateQueries({ queryKey: ["agentDrafts"] });
+      setDraftSavedMessage("נשמר כטיוטה — עברו לדף סוכן לאישור לפני שהשינוי יחול.");
       setCorrectSegment(null);
       setCorrectedText("");
       setCustomerContext("");
+      setConfigField("");
+      setPatchText("");
+      setOperatorNote("");
     },
   });
 
@@ -335,9 +350,18 @@ export function CallsPage() {
         </div>
       )}
 
+      {draftSavedMessage && (
+        <div className="rounded-lg border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
+          {draftSavedMessage}
+        </div>
+      )}
+
       {correctSegment && (
         <div className="rounded-xl border border-violet-200 bg-violet-50 p-4 text-sm">
-          <h4 className="mb-2 font-semibold text-violet-900">תיקון תגובת סוכן</h4>
+          <h4 className="mb-2 font-semibold text-violet-900">משוב לסוכן (טיוטה)</h4>
+          <p className="mb-2 text-xs text-violet-800">
+            השינוי לא יחול מיד — יופיע בדף סוכן לאישור.
+          </p>
           <p className="mb-2">
             <strong>תגובה נוכחית:</strong> {correctSegment.text}
           </p>
@@ -351,7 +375,7 @@ export function CallsPage() {
             />
           </label>
           <label className="mb-3 block">
-            <span className="text-xs text-slate-600">תגובה מתוקנת (לשימוש עתידי)</span>
+            <span className="text-xs text-slate-600">תגובה מתוקנת (אופציונלי)</span>
             <textarea
               className="mt-1 w-full rounded border p-2 text-sm"
               rows={3}
@@ -359,14 +383,50 @@ export function CallsPage() {
               onChange={(e) => setCorrectedText(e.target.value)}
             />
           </label>
+          <div className="mb-3 grid gap-2 sm:grid-cols-2">
+            <label className="block">
+              <span className="text-xs text-slate-600">עדכון הנחיות — שדה (אופציונלי)</span>
+              <select
+                className="mt-1 w-full rounded border p-2 text-sm"
+                value={configField}
+                onChange={(e) => setConfigField(e.target.value as AgentConfigPatchField | "")}
+              >
+                <option value="">ללא</option>
+                <option value="missionHe">משימה</option>
+                <option value="limitsHe">מגבלות</option>
+                <option value="policiesHe">מדיניות</option>
+              </select>
+            </label>
+            <label className="block sm:col-span-2">
+              <span className="text-xs text-slate-600">טקסט להוספה להנחיות</span>
+              <textarea
+                className="mt-1 w-full rounded border p-2 text-sm"
+                rows={2}
+                value={patchText}
+                onChange={(e) => setPatchText(e.target.value)}
+                disabled={!configField}
+              />
+            </label>
+          </div>
+          <label className="mb-3 block">
+            <span className="text-xs text-slate-600">הערה למפעיל (אופציונלי)</span>
+            <input
+              className="mt-1 w-full rounded border p-2 text-sm"
+              value={operatorNote}
+              onChange={(e) => setOperatorNote(e.target.value)}
+            />
+          </label>
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
               className="rounded bg-violet-600 px-3 py-1.5 text-white disabled:opacity-50"
-              disabled={correctMutation.isPending || !correctedText.trim()}
+              disabled={
+                correctMutation.isPending ||
+                (!correctedText.trim() && !(configField && patchText.trim()))
+              }
               onClick={() => correctMutation.mutate()}
             >
-              {correctMutation.isPending ? "שומר..." : "שמור דוגמה מאושרת"}
+              {correctMutation.isPending ? "שומר טיוטה..." : "שמור כטיוטה"}
             </button>
             <button
               type="button"

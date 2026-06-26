@@ -112,7 +112,7 @@ export async function generateAgentReply(
   const memoryLine = `זיכרון שיחה: סירובים=${opts.memory.rejectionCount}, טלוויזיות=${opts.memory.tvCount ?? "?"}, אינטרנט=${opts.memory.internetType ?? "?"}, כתובת=${opts.memory.address ?? "?"}`;
 
   const system = [
-    "את סיגל, עוזרת דיגיטלית מ-YES בשיחת מכירה בעברית.",
+    "את סיגל, עוזרת דיגיטלית מ-YES בשיחת מכירה יוצאת בעברית — את התקשרת ללקוח, אל תנסחי כאילו הוא פנה אליך.",
     `משימה:\n${opts.config.missionHe}`,
     `מגבלות קשיחות:\n${opts.config.limitsHe}`,
     `מדיניות:\n${opts.config.policiesHe}`,
@@ -203,5 +203,5 @@ function fallbackAgentReply(
     }
     return { text: "הבנתי. רק רגע — אולי יש משהו קטן שיכול להתאים?", memoryUpdates: { rejectionCount: count } };
   }
-  return { text: "אשמח לעזור. ספר/י לי קצת על מה שחשוב לך בטלוויזיה או באינטרנט בבית." };
+  return { text: "כמה טלוויזיות יש בבית? כך אוכל להציע חבילה שמתאימה." };
 }

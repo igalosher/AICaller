@@ -207,6 +207,31 @@ model AgentResponseExample {
   @@index([approved])
 }
 
+model AgentConfigVersion {
+  id            String   @id @default(cuid())
+  versionNumber Int      @unique
+  configJson    String
+  label         String?
+  source        String
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model AgentInstructionDraft {
+  id           String   @id @default(cuid())
+  status       String   @default("pending")
+  kind         String
+  payloadJson  String
+  callId       String?
+  segmentId    String?
+  operatorNote String?
+  createdAt    DateTime @default(now())
+
+  @@index([status])
+  @@index([createdAt])
+}
+
 model ProductKnowledgeIndex {
   id        String   @id @default("default")
   dataJson  String

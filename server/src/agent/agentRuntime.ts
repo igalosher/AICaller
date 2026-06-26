@@ -1,6 +1,7 @@
 import type { CallOutcome, Contact } from "@prisma/client";
 import { prisma } from "../db.js";
 import { contactFullName } from "../utils/name.js";
+import { resolveGenderMarkers } from "../utils/genderHebrew.js";
 import {
   findRelevantAgentExamples,
   getAgentConfig,
@@ -21,10 +22,11 @@ export async function prepareAgentOpening(
   contact: Contact,
 ): Promise<VoiceTurnResult> {
   const config = await getAgentConfig();
-  const sayText = config.openingTemplateHe.replace(
+  const raw = config.openingTemplateHe.replace(
     /\{\{customer_full_name\}\}/g,
     contactFullName(contact.firstName, contact.familyName),
   );
+  const sayText = resolveGenderMarkers(raw, contact.sex ?? "male");
 
   await prisma.call.update({
     where: { id: callId },

@@ -210,6 +210,33 @@ export interface AgentConfig {
   openingTemplateHe: string;
   maxRejections: number;
   updatedAt?: string;
+  currentVersionNumber?: number;
+}
+
+export interface AgentConfigVersionSummary {
+  id: string;
+  versionNumber: number;
+  label?: string | null;
+  source: string;
+  createdAt: string;
+}
+
+export interface AgentConfigVersionDetail extends AgentConfigVersionSummary {
+  config: AgentConfig;
+  configJson?: string;
+}
+
+export type AgentConfigPatchField = "missionHe" | "limitsHe" | "policiesHe";
+
+export interface AgentInstructionDraft {
+  id: string;
+  status: string;
+  kind: "response_example" | "config_patch";
+  payloadJson: string;
+  callId?: string | null;
+  segmentId?: string | null;
+  operatorNote?: string | null;
+  createdAt: string;
 }
 
 export interface AgentResponseExample {
