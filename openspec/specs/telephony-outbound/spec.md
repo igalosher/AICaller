@@ -1,7 +1,7 @@
 # telephony-outbound Specification
 
 ## Purpose
-TBD - created by archiving change yes-ai-sales-caller. Update Purpose after archive.
+Outbound telephony for Hebrew AI sales calls: Twilio dial and webhooks, call state tracking, local dev tunnel management with auto-repair, and operator monitoring during live calls.
 ## Requirements
 ### Requirement: Outbound call initiation
 The system SHALL place outbound phone calls to contacts on the closed list using a configured telephony provider. On Twilio, the dial SHALL be initiated **immediately** after webhook reachability is confirmed; opening TTS MAY continue rendering in the background after the dial starts.
@@ -48,15 +48,29 @@ When placing outbound Twilio calls to a **verified** destination number on a tri
 - **THEN** `calls.create` uses the verified Israeli E.164 as `From` when calling that number
 
 ### Requirement: Local dev Twilio tunnel
-Local development with `npm run dev:twilio` SHALL run **cloudflared** alongside the server, write `TWILIO_WEBHOOK_BASE_URL` and `DEV_TWILIO_TUNNEL=1` to `server/.env`, sync the URL to settings, and **restart cloudflared** automatically if the tunnel disconnects. The server SHALL NOT spawn a competing tunnel when `DEV_TWILIO_TUNNEL=1` and the public URL is dead; it SHALL instruct the operator to restart `dev:twilio`.
+Local development with `npm run dev:twilio` SHALL run **cloudflared** alongside the server, write `TWILIO_WEBHOOK_BASE_URL` and `DEV_TWILIO_TUNNEL=1` to `server/.env`, sync the URL to settings, and **restart cloudflared** automatically if the tunnel disconnects. When `DEV_TWILIO_TUNNEL=1`, the server SHALL **not** spawn a competing cloudflared process; it SHALL re-read `.env`, probe candidate URLs, and wait for the dev script to publish a new reachable URL. When the server runs without `DEV_TWILIO_TUNNEL`, it MAY spawn and manage its own cloudflared tunnel.
+
+The server SHALL run a **webhook watchdog** (periodic probe) that detects a dead tunnel and triggers repair before or during outbound calls. Repair SHALL update in-memory env, `.env`, and telephony settings when a working URL is found. The UI MAY show a banner when the tunnel is unreachable.
 
 #### Scenario: Tunnel URL synced on start
 - **WHEN** `dev:twilio` assigns a new trycloudflare URL
 - **THEN** `.env`, database telephony settings, and Twilio voice webhooks use that URL
 
-#### Scenario: Stale tunnel on call
-- **WHEN** `DEV_TWILIO_TUNNEL=1`, the server is up, but the configured webhook URL is unreachable
-- **THEN** starting a call fails with a Hebrew message to restart `npm run dev:twilio`
+#### Scenario: Stale tunnel auto-repair on call
+- **WHEN** the configured webhook URL is unreachable but the local server is up
+- **THEN** `ensureTwilioWebhookReady` probes, re-reads `.env`, adopts a working URL, or (outside `DEV_TWILIO_TUNNEL`) spawns cloudflared before placing the call
+
+#### Scenario: Watchdog recovers dead tunnel
+- **WHEN** a trycloudflare tunnel dies while the server is running
+- **THEN** the watchdog detects the failure within ~90 seconds and runs repair without requiring a manual server restart
+
+#### Scenario: Dev tunnel script owns cloudflared
+- **WHEN** `DEV_TWILIO_TUNNEL=1` and the tunnel is down
+- **THEN** the server waits for `dev:twilio` to restart cloudflared and re-reads the new URL from `.env` instead of killing external cloudflared processes
+
+#### Scenario: Tunnel down banner
+- **WHEN** the webhook tunnel becomes unreachable during local development
+- **THEN** the server broadcasts `tunnel_status` with `reachable: false` and the operator UI shows a Hebrew banner that auto-repair is in progress
 
 ### Requirement: Telephony provider configuration
 Operators SHALL configure telephony credentials (provider API keys, caller ID number, webhook URLs) through a secure settings screen.

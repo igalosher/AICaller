@@ -1,6 +1,8 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { OpenAiBalanceBadge } from "./OpenAiBalanceBadge";
 import { ActiveTestCallProvider, useActiveTestCall } from "../context/ActiveTestCallContext";
+import { connectCallEvents } from "../api";
 
 const nav = [
   { to: "/", label: "לוח בקרה" },
@@ -34,9 +36,32 @@ function ActiveCallChip() {
   );
 }
 
+function TunnelStatusBanner() {
+  const [tunnelDown, setTunnelDown] = useState(false);
+
+  useEffect(() => {
+    const ws = connectCallEvents((data) => {
+      const e = data as { type?: string; reachable?: boolean };
+      if (e.type === "tunnel_status") {
+        setTunnelDown(e.reachable === false);
+      }
+    });
+    return () => ws.close();
+  }, []);
+
+  if (!tunnelDown) return null;
+
+  return (
+    <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-sm text-amber-900">
+      מנהרת Twilio לא זמינה — המערכת מנסה לתקן אוטומטית. אם השיחה נכשלת, המתן כמה שניות ונסה שוב.
+    </div>
+  );
+}
+
 function LayoutShell() {
   return (
     <div className="min-h-screen">
+      <TunnelStatusBanner />
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-4">
           <h1 className="text-xl font-bold text-blue-700">YES AI Caller</h1>

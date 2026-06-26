@@ -6,7 +6,7 @@ import { logger } from "./logger.js";
 import { registerWsClient } from "./websocket/callEvents.js";
 import { runSeed } from "./seed.js";
 import { recoverStuckContacts } from "./services/callService.js";
-import { warnIfWebhookUnreachable } from "./telephony/tunnelManager.js";
+import { warnIfWebhookUnreachable, startTwilioWebhookWatchdog } from "./telephony/tunnelManager.js";
 import {
   handleTwilioMediaMessage,
   unregisterMediaStreamForWs,
@@ -111,6 +111,7 @@ async function main() {
   server.listen(port, () => {
     logger.info({ port }, "AICaller server started");
     void warnIfWebhookUnreachable();
+    startTwilioWebhookWatchdog();
   });
 }
 

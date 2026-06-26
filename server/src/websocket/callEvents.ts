@@ -10,7 +10,8 @@ export type CallEvent =
       intentId: string;
       confidence: number;
     }
-  | { type: "call_ended"; callId: string; outcome: string };
+  | { type: "call_ended"; callId: string; outcome: string }
+  | { type: "tunnel_status"; reachable: boolean; webhookBaseUrl?: string };
 
 const clients = new Set<WebSocket>();
 

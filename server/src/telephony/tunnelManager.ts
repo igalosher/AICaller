@@ -3,15 +3,20 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { logger } from "../logger.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { broadcastCallEvent } from "../websocket/callEvents.js";
 import { getTelephonyConfig, saveTelephonyConfig } from "../services/settingsService.js";
 
 const TUNNEL_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
 const PROBE_PATH = "/health";
 const TUNNEL_START_TIMEOUT_MS = 120_000;
+const WATCHDOG_INTERVAL_MS = 90_000;
 
 let tunnelProcess: ChildProcess | null = null;
 let currentPublicUrl: string | null = null;
 let startingPromise: Promise<string> | null = null;
+let repairingPromise: Promise<boolean> | null = null;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+let lastTunnelReachable: boolean | null = null;
 
 function envPath(): string {
   return join(process.cwd(), ".env");
@@ -32,6 +37,20 @@ function patchEnvWebhook(url: string): void {
     logger.warn({ err }, "Could not write TWILIO_WEBHOOK_BASE_URL to .env");
   }
   process.env.TWILIO_WEBHOOK_BASE_URL = url;
+}
+
+/** Re-read .env without restarting Node (dev-with-tunnel may have written a new URL). */
+function refreshEnvWebhookFromDisk(): string | null {
+  try {
+    const content = readFileSync(envPath(), "utf8");
+    const match = content.match(/^TWILIO_WEBHOOK_BASE_URL=(.+)$/m);
+    if (!match) return null;
+    const url = match[1].trim().replace(/\/$/, "");
+    process.env.TWILIO_WEBHOOK_BASE_URL = url;
+    return url;
+  } catch {
+    return null;
+  }
 }
 
 export async function probeWebhookBaseUrl(baseUrl: string): Promise<boolean> {
@@ -59,15 +78,30 @@ export async function probeWebhookBaseUrl(baseUrl: string): Promise<boolean> {
   }
 }
 
+function isDevTunnelManagedByScript(): boolean {
+  return process.env.DEV_TWILIO_TUNNEL === "1";
+}
+
+async function waitForDevTunnelUrlFromDisk(maxAttempts = 30): Promise<string | null> {
+  for (let i = 0; i < maxAttempts; i++) {
+    const diskUrl = refreshEnvWebhookFromDisk();
+    if (diskUrl && (await probeWebhookBaseUrl(diskUrl))) {
+      currentPublicUrl = diskUrl;
+      await syncWebhookToDb(diskUrl);
+      broadcastTunnelStatus(true, diskUrl);
+      return diskUrl;
+    }
+    await new Promise((r) => setTimeout(r, 2_000));
+  }
+  return null;
+}
+
 function shouldAutoStartTunnel(url: string | undefined): boolean {
+  if (isDevTunnelManagedByScript()) return false;
   if (!url) return true;
   if (url.includes("localhost") || url.includes("127.0.0.1")) return true;
   if (url.includes("trycloudflare.com")) return true;
   return false;
-}
-
-function isDevTwilioTunnelMode(): boolean {
-  return process.env.DEV_TWILIO_TUNNEL === "1";
 }
 
 async function probeLocalServer(port: number): Promise<boolean> {
@@ -102,6 +136,15 @@ function stopTunnelProcess(): void {
   tunnelProcess = null;
 }
 
+/** Kill stale cloudflared left by a dead dev tunnel before we spawn a fresh one. */
+function killExternalCloudflaredProcesses(): void {
+  if (process.platform === "win32") {
+    spawn("taskkill", ["/F", "/IM", "cloudflared.exe"], { shell: true, stdio: "ignore" }).unref();
+  } else {
+    spawn("pkill", ["-f", "cloudflared tunnel"], { shell: true, stdio: "ignore" }).unref();
+  }
+}
+
 const CLOUDFLARED_CANDIDATES = [
   "cloudflared",
   "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe",
@@ -129,11 +172,41 @@ function spawnCloudflared(localPort: number): ChildProcess {
   });
 }
 
+function scheduleTunnelRepair(reason: string): void {
+  setTimeout(() => {
+    void repairTwilioWebhookTunnel().then((ok) => {
+      if (ok) {
+        logger.info({ reason }, "Twilio webhook tunnel auto-repaired");
+      } else {
+        logger.warn({ reason }, "Twilio webhook tunnel auto-repair failed");
+      }
+    });
+  }, 3_000).unref();
+}
+
+function broadcastTunnelStatus(reachable: boolean, url?: string): void {
+  if (lastTunnelReachable === reachable) return;
+  lastTunnelReachable = reachable;
+  broadcastCallEvent({
+    type: "tunnel_status",
+    reachable,
+    webhookBaseUrl: url ?? currentPublicUrl ?? process.env.TWILIO_WEBHOOK_BASE_URL,
+  });
+}
+
 function startCloudflaredTunnel(localPort: number): Promise<string> {
+  if (isDevTunnelManagedByScript()) {
+    return waitForDevTunnelUrlFromDisk().then((url) => {
+      if (url) return url;
+      throw new Error("dev tunnel script has not published a reachable webhook URL yet");
+    });
+  }
+
   if (startingPromise) return startingPromise;
 
   startingPromise = new Promise<string>((resolve, reject) => {
     stopTunnelProcess();
+    killExternalCloudflaredProcesses();
     currentPublicUrl = null;
 
     const port = localPort;
@@ -160,16 +233,19 @@ function startCloudflaredTunnel(localPort: number): Promise<string> {
 
       void (async () => {
         patchEnvWebhook(url);
+        if (!process.env.DEV_TWILIO_TUNNEL) {
+          process.env.DEV_TWILIO_TUNNEL = "1";
+        }
         await syncWebhookToDb(url);
         currentPublicUrl = url;
 
-        // Wait until our API answers through the tunnel (server must already be listening).
-        for (let i = 0; i < 30; i++) {
+        for (let i = 0; i < 45; i++) {
           if (await probeWebhookBaseUrl(url)) {
             if (!settled) {
               settled = true;
               clearTimeout(timeout);
               startingPromise = null;
+              broadcastTunnelStatus(true, url);
               logger.info({ url }, "Twilio webhook tunnel ready");
               resolve(url);
             }
@@ -210,7 +286,9 @@ function startCloudflaredTunnel(localPort: number): Promise<string> {
       if (tunnelProcess === child) {
         tunnelProcess = null;
         currentPublicUrl = null;
-        logger.warn("cloudflared tunnel process exited — will restart on next call if needed");
+        broadcastTunnelStatus(false);
+        logger.warn({ code }, "cloudflared tunnel exited — scheduling auto-repair");
+        scheduleTunnelRepair("cloudflared-exit");
       }
     });
   });
@@ -218,72 +296,102 @@ function startCloudflaredTunnel(localPort: number): Promise<string> {
   return startingPromise;
 }
 
+async function tryAdoptWorkingUrl(urls: string[]): Promise<string | null> {
+  const seen = new Set<string>();
+  for (const raw of urls) {
+    const url = raw?.replace(/\/$/, "");
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    if (await probeWebhookBaseUrl(url)) {
+      currentPublicUrl = url;
+      process.env.TWILIO_WEBHOOK_BASE_URL = url;
+      await syncWebhookToDb(url);
+      broadcastTunnelStatus(true, url);
+      return url;
+    }
+  }
+  return null;
+}
+
+/**
+ * Detect a dead Twilio webhook tunnel and repair it (reload .env, probe, or spawn cloudflared).
+ * Returns true when a working public webhook URL is available.
+ */
+export async function repairTwilioWebhookTunnel(): Promise<boolean> {
+  if (repairingPromise) return repairingPromise;
+
+  repairingPromise = (async () => {
+    const config = await getTelephonyConfig();
+    if (config.provider !== "twilio") return true;
+
+    const port = Number(process.env.PORT ?? 3001);
+    if (!(await probeLocalServer(port))) {
+      logger.warn("Twilio tunnel repair skipped — local server not listening");
+      return false;
+    }
+
+    const diskUrl = refreshEnvWebhookFromDisk();
+    const envUrl = process.env.TWILIO_WEBHOOK_BASE_URL?.replace(/\/$/, "") ?? "";
+    const adopted = await tryAdoptWorkingUrl([
+      diskUrl ?? "",
+      envUrl,
+      currentPublicUrl ?? "",
+      config.webhookBaseUrl ?? "",
+    ]);
+    if (adopted) return true;
+
+    if (isDevTunnelManagedByScript()) {
+      logger.info("Dev tunnel down — waiting for dev:twilio to publish a new URL");
+      const url = await waitForDevTunnelUrlFromDisk();
+      if (url) return true;
+      broadcastTunnelStatus(false, envUrl || diskUrl || config.webhookBaseUrl);
+      return false;
+    }
+
+    const fallbackUrl = config.webhookBaseUrl ?? envUrl ?? diskUrl ?? "";
+    if (!shouldAutoStartTunnel(fallbackUrl)) {
+      broadcastTunnelStatus(false, fallbackUrl);
+      return false;
+    }
+
+    try {
+      const url = await startCloudflaredTunnel(port);
+      const ok = await probeWebhookBaseUrl(url);
+      broadcastTunnelStatus(ok, url);
+      return ok;
+    } catch (err) {
+      logger.error({ err }, "Failed to auto-repair Twilio webhook tunnel");
+      broadcastTunnelStatus(false);
+      return false;
+    }
+  })().finally(() => {
+    repairingPromise = null;
+  });
+
+  return repairingPromise;
+}
+
 /**
  * Ensures Twilio can reach our voice webhook before placing a call.
- * For local dev, starts cloudflared automatically when the configured URL is dead.
  */
 export async function ensureTwilioWebhookReady(): Promise<void> {
   const config = await getTelephonyConfig();
   if (config.provider !== "twilio") return;
 
+  const ok = await repairTwilioWebhookTunnel();
+  if (ok) return;
+
   const port = Number(process.env.PORT ?? 3001);
-  const envUrl = process.env.TWILIO_WEBHOOK_BASE_URL?.replace(/\/$/, "") ?? "";
-  let url = config.webhookBaseUrl ?? envUrl ?? "";
-
-  if (envUrl && (await probeWebhookBaseUrl(envUrl))) {
-    if (config.webhookBaseUrl !== envUrl) {
-      await syncWebhookToDb(envUrl);
-    }
-    currentPublicUrl = envUrl;
-    return;
-  }
-
-  if (currentPublicUrl && (await probeWebhookBaseUrl(currentPublicUrl))) {
-    if (url !== currentPublicUrl) {
-      patchEnvWebhook(currentPublicUrl);
-      await syncWebhookToDb(currentPublicUrl);
-    }
-    return;
-  }
-
-  if (url && (await probeWebhookBaseUrl(url))) {
-    await syncWebhookToDb(url);
-    currentPublicUrl = url;
-    return;
-  }
-
-  if (!shouldAutoStartTunnel(url)) {
+  if (await probeLocalServer(port)) {
     throw new AppError(
       503,
-      "כתובת ה-webhook של Twilio לא נגישה. עדכן את כתובת השרת בהגדרות טלפוניה.",
+      "לא ניתן להפעיל מנהרה ל-Twilio. ודא ש-cloudflared זמין (npm install -g cloudflared או npx) ונסה שוב.",
     );
   }
-
-  if (isDevTwilioTunnelMode() && (await probeLocalServer(port))) {
-    throw new AppError(
-      503,
-      "המנהרה ל-Twilio לא פעילה. הפעל מחדש את npm run dev:twilio (השאר את הטרמינל פתוח).",
-    );
-  }
-
-  try {
-    url = await startCloudflaredTunnel(port);
-    if (!(await probeWebhookBaseUrl(url))) {
-      throw new Error("Webhook probe failed after tunnel start");
-    }
-  } catch (err) {
-    logger.error({ err }, "Failed to start Twilio webhook tunnel");
-    if (await probeLocalServer(port)) {
-      throw new AppError(
-        503,
-        "המנהרה ל-Twilio לא פעילה. הפעל מחדש את npm run dev:twilio (השאר את הטרמינל פתוח).",
-      );
-    }
-    throw new AppError(
-      503,
-      "לא ניתן להפעיל מנהרה ל-Twilio. ודא שהשרת רץ וש-cloudflared זמין (npm install -g cloudflared או npx).",
-    );
-  }
+  throw new AppError(
+    503,
+    "השרת לא זמין. הפעל מחדש את npm run dev:twilio.",
+  );
 }
 
 export async function warnIfWebhookUnreachable(): Promise<void> {
@@ -292,26 +400,55 @@ export async function warnIfWebhookUnreachable(): Promise<void> {
 
   const url = config.webhookBaseUrl ?? process.env.TWILIO_WEBHOOK_BASE_URL;
   if (!url) {
-    logger.warn("TWILIO_WEBHOOK_BASE_URL is not set — a tunnel will start automatically on the next call");
+    logger.warn("TWILIO_WEBHOOK_BASE_URL is not set — auto-repair will start a tunnel");
+    void repairTwilioWebhookTunnel();
     return;
   }
 
-  if (await probeWebhookBaseUrl(url)) return;
-
-  if (isDevTwilioTunnelMode()) {
-    logger.warn(
-      { url },
-      "Twilio webhook tunnel is down — restart npm run dev:twilio to get a fresh cloudflared URL",
-    );
+  if (await probeWebhookBaseUrl(url)) {
+    broadcastTunnelStatus(true, url);
     return;
   }
 
-  if (shouldAutoStartTunnel(url)) {
-    logger.warn(
-      { url },
-      "Twilio webhook URL not reachable — a tunnel will start automatically when you place the next call",
-    );
-  } else {
-    logger.warn({ url }, "Twilio webhook URL unreachable — voice calls will fail until it is fixed");
-  }
+  logger.warn({ url }, "Twilio webhook unreachable — starting auto-repair");
+  void repairTwilioWebhookTunnel();
+}
+
+/** Background probe + repair so tunnels recover without manual restarts. */
+export function startTwilioWebhookWatchdog(): void {
+  if (watchdogTimer) return;
+
+  watchdogTimer = setInterval(() => {
+    void (async () => {
+      const config = await getTelephonyConfig();
+      if (config.provider !== "twilio") return;
+
+      refreshEnvWebhookFromDisk();
+      const url =
+        currentPublicUrl ??
+        process.env.TWILIO_WEBHOOK_BASE_URL ??
+        config.webhookBaseUrl;
+      if (url && (await probeWebhookBaseUrl(url))) {
+        broadcastTunnelStatus(true, url);
+        return;
+      }
+
+      logger.info("Twilio webhook watchdog: tunnel down, repairing");
+      await repairTwilioWebhookTunnel();
+    })();
+  }, WATCHDOG_INTERVAL_MS);
+  watchdogTimer.unref();
+}
+
+export function getTwilioTunnelStatus(): {
+  reachable: boolean | null;
+  webhookBaseUrl: string | null;
+  managedByServer: boolean;
+} {
+  return {
+    reachable: lastTunnelReachable,
+    webhookBaseUrl:
+      currentPublicUrl ?? process.env.TWILIO_WEBHOOK_BASE_URL ?? null,
+    managedByServer: tunnelProcess !== null,
+  };
 }
