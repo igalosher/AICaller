@@ -139,6 +139,7 @@ export interface Call {
   startedAt: string;
   endedAt?: string | null;
   durationSec?: number | null;
+  conversationMode?: "flow" | "agent";
   contact?: Contact;
   transcript?: TranscriptSegment[];
 }
@@ -200,4 +201,23 @@ export interface DashboardSummary {
   refused: number;
   soldToday: number;
   activeCall: boolean;
+}
+
+export interface AgentConfig {
+  missionHe: string;
+  limitsHe: string;
+  policiesHe: string;
+  openingTemplateHe: string;
+  maxRejections: number;
+  updatedAt?: string;
+}
+
+export interface AgentResponseExample {
+  id: string;
+  customerText: string;
+  aiResponseBad?: string | null;
+  correctedText: string;
+  callId?: string | null;
+  segmentId?: string | null;
+  createdAt: string;
 }

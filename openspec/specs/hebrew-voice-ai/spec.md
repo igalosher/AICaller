@@ -149,12 +149,34 @@ On real Twilio calls, AI speech SHALL be delivered as **pre-rendered ElevenLabs 
 - **WHEN** the runtime speaks a graph reply on a connected Twilio call
 - **THEN** a new MP3 clip is synthesized and pushed to the active call via TwiML update
 
-### Requirement: STT deferral during AI playback
-On Twilio media-stream calls, final Deepgram transcripts received while AI audio is playing SHALL be buffered and processed only after playback ends, so opening and replies are not interrupted by echo or early barge-in.
+### Requirement: Real-time barge-in on Twilio calls
+On Twilio media-stream calls, when Deepgram detects customer speech while AI audio is playing (TwiML `<Play>` or streamed TTS), the system SHALL **immediately** stop AI playback, then process the customer's utterance. Interim transcripts MAY trigger early playback stop once they reach a minimum length; final transcripts SHALL be classified without waiting for AI speech to finish. If the customer speaks multiple times while a turn is still processing, only the **latest** utterance SHALL be queued after the current turn completes.
 
-#### Scenario: Transcript held during opening
+#### Scenario: Interrupt during opening
 - **WHEN** the customer speaks during the opening `<Play>` clip
-- **THEN** the final transcript is deferred until opening playback completes, then processed as the first customer turn
+- **THEN** Twilio playback stops within ~500 ms and the customer's final transcript is processed as their turn
+
+#### Scenario: Latest utterance wins during processing
+- **WHEN** the customer says "רגע" and then "לא מעוניין" while the AI is still generating a reply
+- **THEN** the system processes "לא מעוניין" (not both utterances sequentially after playback ends)
+
+### Requirement: Agent-mode voice turns
+When a call's `conversationMode` is `agent`, the voice pipeline SHALL use the autonomous agent runtime for opening and customer turns instead of graph/staged flow navigation.
+
+#### Scenario: Agent call uses agent runtime
+- **WHEN** a connected call has `conversationMode` `agent`
+- **THEN** customer utterances are handled by the agent runtime rather than flow graph routing
+
+### Requirement: ElevenLabs TTS error surfacing
+When ElevenLabs synthesis fails, the system SHALL log the API status and return a **Hebrew user-facing message** that distinguishes missing API key, invalid key, and quota exhaustion. Browser test calls SHALL display the message on the test-call panel instead of a generic key error.
+
+#### Scenario: Quota exceeded
+- **WHEN** ElevenLabs returns `quota_exceeded` for a synthesis request
+- **THEN** the operator sees a Hebrew message indicating quota is exhausted and credits must be topped up
+
+#### Scenario: v3 quota fallback
+- **WHEN** `eleven_v3` fails with quota exceeded and a flash model retry is configured
+- **THEN** the system retries once with `eleven_flash_v2_5` before surfacing the error
 
 ### Requirement: Intent-driven flow navigation
 After each classified customer utterance, the voice pipeline SHALL advance the call according to the active engine: **staged** (`currentStageId`, `advanceOn`, opt-out, Q&A interrupt) or **graph** (edges matching intent), then generate the next speak content.

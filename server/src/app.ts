@@ -7,6 +7,7 @@ import callFlowsRouter from "./routes/callFlows.js";
 import catalogRouter from "./routes/catalog.js";
 import intentsRouter from "./routes/intents.js";
 import settingsRouter from "./routes/settings.js";
+import agentRouter from "./routes/agent.js";
 import dashboardRouter from "./routes/dashboard.js";
 import webhooksRouter from "./routes/webhooks.js";
 import { errorHandler } from "./middleware/errorHandler.js";
@@ -35,6 +36,7 @@ export function createApp() {
   app.use("/api/catalog", catalogRouter);
   app.use("/api/intents", intentsRouter);
   app.use("/api/settings", settingsRouter);
+  app.use("/api/agent", agentRouter);
   app.use("/api/dashboard", dashboardRouter);
   app.use("/api/webhooks", webhooksRouter);
 

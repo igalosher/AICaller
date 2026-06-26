@@ -26,7 +26,13 @@ export const callsApi = {
   get: (id: string) => api.get<Call>(`/calls/${id}`).then((r) => r.data),
   start: (contactId: string) =>
     api.post<Call>("/calls/start", { contactId }, { timeout: 120_000 }).then((r) => r.data),
-  startTest: (contactId: string) => api.post<Call>("/calls/test-start", { contactId }).then((r) => r.data),
+  startTest: (contactId: string, options?: { skipVoice?: boolean }) =>
+    api
+      .post<Call & { testSkipVoice?: boolean }>("/calls/test-start", {
+        contactId,
+        skipVoice: options?.skipVoice,
+      })
+      .then((r) => r.data),
   hangUp: (id: string) => api.post<{ ok: boolean }>(`/calls/${id}/hangup`).then((r) => r.data),
   testRewind: (id: string) =>
     api.post<{ sayText: string; currentNodeId: string }>(`/calls/${id}/test-rewind`).then((r) => r.data),
@@ -122,6 +128,26 @@ export const settingsApi = {
       }>("/settings/ai/balance")
       .then((r) => r.data),
   saveAi: (data: Record<string, unknown>) => api.put("/settings/ai", data).then((r) => r.data),
+  getConversationMode: () =>
+    api.get<{ mode: "flow" | "agent" }>("/settings/conversation-mode").then((r) => r.data),
+  setConversationMode: (mode: "flow" | "agent") =>
+    api.put<{ mode: "flow" | "agent" }>("/settings/conversation-mode", { mode }).then((r) => r.data),
+};
+
+export const agentApi = {
+  getConfig: () => api.get<import("./types").AgentConfig>("/agent/config").then((r) => r.data),
+  saveConfig: (data: import("./types").AgentConfig) =>
+    api.put<import("./types").AgentConfig>("/agent/config", data).then((r) => r.data),
+  listExamples: () =>
+    api.get<{ items: import("./types").AgentResponseExample[] }>("/agent/examples").then((r) => r.data),
+  createExample: (data: {
+    customerText: string;
+    aiResponseBad?: string;
+    correctedText: string;
+    callId?: string;
+    segmentId?: string;
+  }) => api.post<import("./types").AgentResponseExample>("/agent/examples", data).then((r) => r.data),
+  deleteExample: (id: string) => api.delete(`/agent/examples/${id}`),
 };
 
 export const dashboardApi = {

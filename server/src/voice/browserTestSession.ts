@@ -44,6 +44,21 @@ interface BrowserTestSession {
 }
 
 const sessions = new Map<string, BrowserTestSession>();
+/** Test calls that should skip ElevenLabs TTS (text/transcript only). */
+const skipVoiceCallIds = new Set<string>();
+
+export function setBrowserTestSkipVoice(callId: string, skip: boolean): void {
+  if (skip) skipVoiceCallIds.add(callId);
+  else skipVoiceCallIds.delete(callId);
+}
+
+export function isBrowserTestSkipVoice(callId: string): boolean {
+  return skipVoiceCallIds.has(callId);
+}
+
+export function clearBrowserTestSkipVoice(callId: string): void {
+  skipVoiceCallIds.delete(callId);
+}
 
 async function handleCustomerText(callId: string, text: string) {
   const session = sessions.get(callId);
@@ -217,9 +232,27 @@ export async function speakToBrowser(
     return { played: false, durationMs: 0 };
   }
 
-  const audio = await synthesizeHebrewSpeechMp3(text, options);
+  if (isBrowserTestSkipVoice(callId)) {
+    stopThinkingToBrowser(callId);
+    session.ws.send(JSON.stringify({ type: "voice_skipped", text: text.trim() }));
+    if (endCall && session.pendingCallEnd) {
+      await completePendingCallEnd(callId);
+    }
+    logger.info({ callId, chars: text.length }, "Browser test voice skipped — no TTS");
+    return { played: false, durationMs: 0 };
+  }
+
+  const { audio, errorMessage } = await synthesizeHebrewSpeechMp3(text, options);
   if (!audio?.length) {
-    logger.warn({ callId }, "Browser test TTS skipped — no audio");
+    logger.warn({ callId, errorMessage }, "Browser test TTS skipped — no audio");
+    if (session.ws.readyState === 1) {
+      session.ws.send(
+        JSON.stringify({
+          type: "error",
+          message: errorMessage ?? "לא ניתן להפיק דיבור",
+        }),
+      );
+    }
     if (endCall && session.pendingCallEnd) {
       await completePendingCallEnd(callId);
     }

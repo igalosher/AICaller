@@ -66,6 +66,7 @@ model Call {
   currentSubflowId  String?
   currentNodeId     String?
   contextJson       String                @default("{}")
+  conversationMode  String                @default("flow")
   summary        String?
   startedAt      DateTime              @default(now())
   endedAt        DateTime?
@@ -187,7 +188,23 @@ model AppSettings {
   id              String   @id @default("default")
   telephonyConfig String?
   aiConfig        String?
+  conversationMode String  @default("flow")
+  agentConfigJson  String?
   updatedAt       DateTime @updatedAt
+}
+
+model AgentResponseExample {
+  id            String   @id @default(cuid())
+  customerText  String
+  aiResponseBad String?
+  correctedText String
+  tags          String   @default("[]")
+  callId        String?
+  segmentId     String?
+  approved      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  @@index([approved])
 }
 
 model ProductKnowledgeIndex {

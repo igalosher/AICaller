@@ -8,6 +8,7 @@ import {
 } from "../services/settingsService.js";
 import { getOpenAiBalanceStatus } from "../services/openaiBillingService.js";
 import { productTools } from "../services/productKnowledge.js";
+import { getConversationMode, saveConversationMode, type ConversationMode } from "../services/conversationModeService.js";
 
 const router = Router();
 
@@ -75,6 +76,27 @@ router.put("/ai", async (req, res, next) => {
 router.get("/product-tools/list-packets", async (_req, res, next) => {
   try {
     res.json(await productTools.list_packets());
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get("/conversation-mode", async (_req, res, next) => {
+  try {
+    res.json({ mode: await getConversationMode() });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.put("/conversation-mode", async (req, res, next) => {
+  try {
+    const mode = req.body.mode as ConversationMode;
+    if (mode !== "flow" && mode !== "agent") {
+      res.status(400).json({ error: "mode must be flow or agent" });
+      return;
+    }
+    res.json({ mode: await saveConversationMode(mode) });
   } catch (e) {
     next(e);
   }

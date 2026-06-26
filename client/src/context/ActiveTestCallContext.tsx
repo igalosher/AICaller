@@ -11,12 +11,14 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { callsApi } from "../api";
+import { readTestCallSkipVoice, writeTestCallSkipVoice } from "../testCallPrefs";
 
 type TestCallStatus = "idle" | "connecting" | "ready" | "ended" | "error";
 
 type ServerMessage =
   | { type: "ready" }
   | { type: "play"; mime: string; audio: string }
+  | { type: "voice_skipped"; text: string }
   | { type: "stop_playback" }
   | { type: "speak_skipped" }
   | { type: "thinking_start" }
@@ -27,6 +29,8 @@ type ServerMessage =
 type ActiveTestCallContextValue = {
   callId: string | null;
   isTestCallActive: boolean;
+  skipVoice: boolean;
+  setSkipVoice: (value: boolean) => void;
   status: TestCallStatus;
   error: string | null;
   reply: string;
@@ -48,6 +52,8 @@ export function useActiveTestCall(): ActiveTestCallContextValue {
     return {
       callId: null,
       isTestCallActive: false,
+      skipVoice: false,
+      setSkipVoice: () => {},
       status: "idle",
       error: null,
       reply: "",
@@ -82,8 +88,13 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
         activeCall.status === "ringing")
     ) {
       setSessionCallId(activeCall.id);
+      const withSkip = activeCall as { testSkipVoice?: boolean };
+      if (withSkip.testSkipVoice) {
+        setSkipVoiceState(true);
+        writeTestCallSkipVoice(true);
+      }
     }
-  }, [activeCall?.id, activeCall?.externalCallId, activeCall?.status]);
+  }, [activeCall?.id, activeCall?.externalCallId, activeCall?.status, activeCall]);
 
   const testCallId = sessionCallId;
 
@@ -94,6 +105,12 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [canRewind, setCanRewind] = useState(false);
   const [rewinding, setRewinding] = useState(false);
+  const [skipVoice, setSkipVoiceState] = useState(readTestCallSkipVoice);
+
+  const setSkipVoice = useCallback((value: boolean) => {
+    setSkipVoiceState(value);
+    writeTestCallSkipVoice(value);
+  }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -293,7 +310,16 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
             return;
           }
           if (msg.type === "play") {
-            void playMp3(msg.audio);
+            void playMp3(msg.audio).catch((err) => {
+              console.error("test call audio playback failed", err);
+              setError("שגיאה בהשמעת הדיבור בדפדפן");
+              setSending(false);
+              setIsPlaying(false);
+            });
+            return;
+          }
+          if (msg.type === "voice_skipped") {
+            finishPlayback();
             return;
           }
           if (msg.type === "stop_playback") {
@@ -367,6 +393,8 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
   const value: ActiveTestCallContextValue = {
     callId: testCallId,
     isTestCallActive: Boolean(testCallId),
+    skipVoice,
+    setSkipVoice,
     status,
     error,
     reply,
@@ -388,6 +416,8 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
 export function TestCallAudioPanel({ showWhenIdle = false }: { showWhenIdle?: boolean }) {
   const {
     isTestCallActive,
+    skipVoice,
+    setSkipVoice,
     status,
     error,
     reply,
@@ -426,7 +456,9 @@ export function TestCallAudioPanel({ showWhenIdle = false }: { showWhenIdle?: bo
   const statusLabel: Record<TestCallStatus, string> = {
     idle: "אין שיחת טסט פעילה",
     connecting: "מתחבר לשיחת הטסט...",
-    ready: "שיחת טסט פעילה — הקלידו תשובה ולחצו Enter",
+    ready: skipVoice
+      ? "שיחת טסט פעילה (בלי דיבור) — הקלידו תשובה ולחצו Enter"
+      : "שיחת טסט פעילה — הקלידו תשובה ולחצו Enter",
     ended: "שיחת הטסט הסתיימה",
     error: "שגיאה",
   };
@@ -441,7 +473,20 @@ export function TestCallAudioPanel({ showWhenIdle = false }: { showWhenIdle?: bo
           : "border-emerald-200 bg-emerald-50 text-emerald-900"
       }`}
     >
-      <p className="font-medium">שיחת טסט (רמקול + הקלדה)</p>
+      <p className="font-medium">
+        {skipVoice ? "שיחת טסט (הקלדה בלבד)" : "שיחת טסט (רמקול + הקלדה)"}
+      </p>
+      {!isTestCallActive && (
+        <label className="mt-2 flex cursor-pointer items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="size-4 rounded border-emerald-400"
+            checked={skipVoice}
+            onChange={(e) => setSkipVoice(e.target.checked)}
+          />
+          בלי דיבור — חוסך קרדיטים ElevenLabs (לשיחת הטסט הבאה)
+        </label>
+      )}
       <p className="mt-1">{error ?? statusLabel[status]}</p>
       {status === "ready" && (
         <div className="mt-2 flex flex-wrap items-center gap-2">

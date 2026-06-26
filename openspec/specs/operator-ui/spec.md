@@ -85,6 +85,27 @@ The application SHALL provide a dedicated Intent Management screen to create/edi
 - **WHEN** an operator corrects a misclassified utterance on the Calls screen and saves as example
 - **THEN** the phrase is added to the chosen intent without leaving the call review flow
 
+### Requirement: Conversation mode switch
+The application header SHALL display a **Flow Mode / Agent Mode** switch adjacent to the YES AI Caller logo. The switch SHALL reflect the persisted global conversation mode and save changes without a full page reload.
+
+#### Scenario: Mode visible on all screens
+- **WHEN** an operator navigates any main screen
+- **THEN** the mode switch remains visible in the header
+
+### Requirement: Agent configuration screen
+The application SHALL provide a navigation entry **סוכן** (Agent) for configuring mission, limits, policies, opening template, and the learning example library.
+
+#### Scenario: Open Agent screen
+- **WHEN** an operator clicks **סוכן** in the nav
+- **THEN** the Agent configuration UI opens with mission, limits, policies, and examples sections
+
+### Requirement: AI response correction on Calls
+On the Calls / call-detail view, AI transcript lines from **agent-mode** calls SHALL offer a control to submit a corrected response that is saved to the agent example library.
+
+#### Scenario: Correct AI line
+- **WHEN** an operator corrects an AI transcript line on an agent call
+- **THEN** the correction is saved as an approved example without leaving the Calls screen
+
 ### Requirement: OpenAI balance indicator
 The application header SHALL display an OpenAI balance or billing-status badge near the logo, refreshing periodically when an API key is configured.
 
@@ -121,4 +142,15 @@ While a call is active (`connected`, `dialing`, or `ringing`), the operator UI S
 #### Scenario: Indicator visible on flow builder during test call
 - **WHEN** a browser test call is `connected` and the operator opens **בניית זרימה**
 - **THEN** a compact active-call indicator remains visible with a link back to **שיחות**
+
+### Requirement: Test call skip-voice control
+The Contacts screen and idle test-call panel SHALL offer a checkbox **בלי דיבור — חוסך קרדיטים ElevenLabs** that persists in browser storage and applies to the next browser test call.
+
+#### Scenario: Checkbox on contacts
+- **WHEN** an operator enables skip-voice on **אנשי קשר** and starts **שיחת טסט**
+- **THEN** the test-call panel title shows **הקלדה בלבד** and no TTS audio is requested for that call
+
+#### Scenario: Preference remembered
+- **WHEN** an operator enables skip-voice and reloads the application
+- **THEN** the checkbox remains checked until explicitly cleared
 

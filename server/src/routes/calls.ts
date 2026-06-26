@@ -54,8 +54,9 @@ router.post("/start", async (req, res, next) => {
 
 router.post("/test-start", async (req, res, next) => {
   try {
-    const { contactId } = req.body as { contactId: string };
-    res.status(201).json(await startTestCall(contactId));
+    const { contactId, skipVoice } = req.body as { contactId: string; skipVoice?: boolean };
+    const call = await startTestCall(contactId, { skipVoice: Boolean(skipVoice) });
+    res.status(201).json(call ? { ...call, testSkipVoice: Boolean(skipVoice) } : call);
   } catch (e) {
     next(e);
   }

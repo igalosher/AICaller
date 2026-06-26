@@ -1,7 +1,8 @@
 # browser-test-call Specification
 
 ## Purpose
-TBD - created by archiving change test-call-skip-speak. Update Purpose after archive.
+Browser-based test calls let operators exercise the same call runtime as Twilio (flow or agent mode) without telephony: AI replies appear in the transcript, optional ElevenLabs TTS plays in the browser, and the operator types customer replies over a WebSocket owned by the app shell.
+
 ## Requirements
 ### Requirement: Browser test call session
 The system SHALL support browser-based test calls where operators hear AI TTS and type customer replies over a WebSocket, without Twilio. The WebSocket connection SHALL be owned at application shell level, not tied to the Calls page mount lifecycle.
@@ -56,4 +57,40 @@ A browser test call session SHALL remain active when the operator navigates to o
 #### Scenario: Return to calls and continue
 - **WHEN** the operator returns to **שיחות** during an active test call
 - **THEN** the test-call audio controls and reply input are available without starting a new call
+
+### Requirement: No silence retry in test calls
+Browser test calls SHALL NOT schedule the graph/agent **20-second silence repeat** timer. Operators test flows by typing replies; automatic silence retries waste LLM/TTS credits and are inappropriate for keyboard-driven sessions.
+
+#### Scenario: No auto-repeat after 20s idle
+- **WHEN** a browser test call is connected and the operator does not type a reply for 20+ seconds at a listen checkpoint
+- **THEN** the system does not invoke a silence-timeout customer turn or repeat the last question
+
+### Requirement: Skip voice to save ElevenLabs credits
+Operators SHALL be able to start browser test calls **without TTS synthesis**. When skip-voice is enabled, the runtime SHALL still advance flow/agent state and write transcripts, but SHALL NOT call ElevenLabs for that call.
+
+#### Scenario: Checkbox before starting test call
+- **WHEN** an operator enables **שיחת טסט בלי דיבור** on the Contacts screen (or the test-call panel when idle)
+- **THEN** the preference is persisted locally and passed to `POST /calls/test-start` as `skipVoice: true`
+
+#### Scenario: Text-only test session
+- **WHEN** a test call starts with `skipVoice: true` and the WebSocket session begins
+- **THEN** AI lines appear in the live transcript, the server sends `{ type: "voice_skipped", text }` instead of `{ type: "play" }`, and the reply input is available without waiting for audio
+
+#### Scenario: Skip voice does not affect real calls
+- **WHEN** an operator places a real Twilio outbound call
+- **THEN** ElevenLabs TTS runs normally regardless of the browser test skip-voice preference
+
+### Requirement: Test call WebSocket reconnect kickoff
+The server SHALL deliver the opening utterance reliably across WebSocket reconnects (e.g. React Strict Mode). The first `start` message prepares flow state once; reconnects replay the latest AI transcript line without re-advancing the graph.
+
+#### Scenario: Strict-mode double connect
+- **WHEN** the client disconnects and reconnects before opening TTS finishes
+- **THEN** the operator still receives the opening (or transcript replay) without duplicate graph advancement
+
+### Requirement: Skip voice WebSocket protocol
+When voice is skipped for a test call, the server SHALL send `{ type: "voice_skipped", text: string }` and the client SHALL treat it like completed playback (enable reply input, send `playback_done`).
+
+#### Scenario: Voice skipped after customer reply
+- **WHEN** skip-voice is active and the server finishes an AI turn
+- **THEN** the client receives `voice_skipped` and does not attempt audio decode
 

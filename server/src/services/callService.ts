@@ -25,7 +25,6 @@ import {
   clearPlayback,
   hasMediaSession,
   isStreamingTtsOnCall,
-  flushPendingCustomerSpeech,
   registerMediaStreamCallbacks,
   registerVoiceHandlers,
   speakOnCall,
@@ -34,11 +33,13 @@ import {
   unregisterMediaStream,
 } from "../voice/mediaSession.js";
 import {
+  clearBrowserTestSkipVoice,
   disconnectBrowserTestCall,
   completePendingCallEnd,
   hasBrowserSession,
   registerBrowserTestHandlers,
   setBrowserPendingCallEnd,
+  setBrowserTestSkipVoice,
   speakToBrowser,
   startThinkingToBrowser,
   stopBrowserPlayback,
@@ -49,6 +50,10 @@ import { hangupTwilioCall, interruptTwilioPlay, playOnTwilioCall, playThinkingOn
 import { createPlayClip } from "../voice/playAudio.js";
 import { toTelephonyError } from "../telephony/errors.js";
 import { ensureTwilioWebhookReady } from "../telephony/tunnelManager.js";
+import { getConversationMode } from "./conversationModeService.js";
+import { prepareAgentOpening, processAgentTurn } from "../agent/agentRuntime.js";
+import { serializeAgentContext } from "../agent/agentLlm.js";
+import { getAgentConfig } from "./agentConfigService.js";
 import { logger } from "../logger.js";
 import { createEngineFromGraph, GraphFlowEngine } from "../flow/graphFlowEngine.js";
 import {
@@ -112,11 +117,16 @@ export type VoiceTurnResult = { sayText: string; endCall: boolean; pendingOutcom
 type SessionEngine =
   | { mode: "graph"; engine: GraphFlowEngine }
   | { mode: "linear"; engine: CallFlowEngine }
-  | { mode: "staged"; engine: StagedFlowEngine };
+  | { mode: "staged"; engine: StagedFlowEngine }
+  | { mode: "agent" };
 
 const activeSessions = new Map<string, { tts?: TtsSession; session: SessionEngine }>();
 const voiceSessionsStarted = new Set<string>();
 const voiceKickoffStarted = new Set<string>();
+/** Browser test calls — skip Twilio-style silence retries and track kickoff across WS reconnects. */
+const browserTestCallIds = new Set<string>();
+const browserTestKickoffDone = new Set<string>();
+const browserTestKickoffInFlight = new Set<string>();
 
 async function markCallRingingIfActive(
   callId: string,
@@ -142,8 +152,8 @@ async function markCallRingingIfActive(
 const stagedSilenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const graphSilenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const preloadedOpeningClips = new Map<string, { clipId: string; sayText: string; durationMs: number }>();
-const speechTurnChains = new Map<string, Promise<void>>();
-/** Do not interrupt Twilio <Play> or overlap silence timers while AI audio is still playing. */
+const queuedCustomerSpeech = new Map<string, string>();
+const customerSpeechWorkers = new Map<string, Promise<void>>();
 const aiPlaybackUntil = new Map<string, number>();
 type AiPlaybackKind = "twiml" | "stream";
 const aiPlaybackKind = new Map<string, AiPlaybackKind>();
@@ -185,8 +195,8 @@ export function isAiSpeaking(callId: string): boolean {
 
 function onAiPlaybackEnded(callId: string): void {
   clearAiPlayback(callId);
+  if (browserTestCallIds.has(callId)) return;
   maybeScheduleGraphSilenceForCall(callId);
-  void flushPendingCustomerSpeech(callId);
 }
 
 function startThinkingFeedback(callId: string, twilioCall = false): void {
@@ -328,6 +338,21 @@ export async function ensureOpeningClipForAnswer(callId: string): Promise<Openin
   });
   if (!call?.contact || !call.callFlow) return null;
 
+  if (call.conversationMode === "agent") {
+    try {
+      const config = await getAgentConfig();
+      const sayText = config.openingTemplateHe.replace(
+        /\{\{customer_full_name\}\}/g,
+        contactFullName(call.contact.firstName, call.contact.familyName),
+      );
+      logger.warn({ callId }, "Agent opening clip missing at answer — rendering");
+      return synthesizeOpeningClip(callId, call.contact, sayText);
+    } catch (err) {
+      logger.error({ err, callId }, "Failed to render agent opening at answer");
+      return null;
+    }
+  }
+
   try {
     const graph = getPublishedGraphForCall(call.callFlow);
     const startNodeId = call.currentNodeId ?? graph?.startNodeId ?? "speak_opening";
@@ -397,6 +422,7 @@ export function clearGraphSilence(callId: string): void {
 }
 
 export function scheduleGraphSilence(callId: string): void {
+  if (browserTestCallIds.has(callId)) return;
   clearGraphSilence(callId);
   const timer = setTimeout(() => {
     void handleGraphSilenceTimeout(callId);
@@ -424,18 +450,24 @@ function shouldDeferForAiPlayback(callId: string): boolean {
 
 async function handleGraphSilenceTimeout(callId: string): Promise<void> {
   graphSilenceTimers.delete(callId);
+  if (browserTestCallIds.has(callId)) return;
   if (shouldDeferForAiPlayback(callId)) {
     deferGraphSilenceUntilAiDone(callId);
     return;
   }
 
   const session = activeSessions.get(callId);
-  if (session?.session.mode !== "graph") return;
-  const listenId = getListenCheckpoint(session.session.engine);
-  if (!listenId) return;
+  if (session?.session.mode === "agent") {
+    // agent mode uses the same silence repeat timer
+  } else if (session?.session.mode !== "graph") return;
+  if (session?.session.mode === "graph") {
+    const listenId = getListenCheckpoint(session.session.engine);
+    if (!listenId) return;
+  }
 
   const call = await prisma.call.findUnique({ where: { id: callId } });
   if (!call || call.status !== "connected") return;
+  if (isTestCall(call.externalCallId)) return;
 
   try {
     await handleCustomerSpeech(callId, "");
@@ -445,7 +477,15 @@ async function handleGraphSilenceTimeout(callId: string): Promise<void> {
 }
 
 export function maybeScheduleGraphSilenceForCall(callId: string): void {
+  if (browserTestCallIds.has(callId)) {
+    clearGraphSilence(callId);
+    return;
+  }
   const session = activeSessions.get(callId);
+  if (session?.session.mode === "agent") {
+    scheduleGraphSilence(callId);
+    return;
+  }
   if (session?.session.mode !== "graph") {
     clearGraphSilence(callId);
     return;
@@ -970,6 +1010,9 @@ async function endActiveTestCallsForContact(contactId: string): Promise<void> {
     unregisterBrowserSession(call.id);
     activeSessions.delete(call.id);
     voiceSessionsStarted.delete(call.id);
+    browserTestCallIds.delete(call.id);
+    browserTestKickoffDone.delete(call.id);
+    clearBrowserTestSkipVoice(call.id);
     logger.info({ callId: call.id, contactId }, "Ended prior browser test call for new test");
   }
 }
@@ -981,12 +1024,17 @@ export async function startCall(contactId: string) {
   ensureCallable(contact.status);
 
   const flow = await getActiveCallFlow();
+  const mode = await getConversationMode();
   const graph = getPublishedGraphForCall(flow);
   const staged = parseStagedFlow(flow.stagesJson);
   const startStageId =
     graph?.startNodeId ?? staged?.stages[0]?.id ?? JSON.parse(flow.stagesJson)[0]?.id ?? "opening";
   const initialContext =
-    graph ? serializeGraphContext(initGraphContext(graph)) : "{}";
+    mode === "agent"
+      ? serializeAgentContext({ rejectionCount: 0 })
+      : graph
+        ? serializeGraphContext(initGraphContext(graph))
+        : "{}";
 
   const call = await prisma.call.create({
     data: {
@@ -997,6 +1045,7 @@ export async function startCall(contactId: string) {
       currentNodeId: graph ? startStageId : undefined,
       currentSubflowId: null,
       contextJson: initialContext,
+      conversationMode: mode,
     },
   });
 
@@ -1029,23 +1078,37 @@ export async function startCall(contactId: string) {
     );
 
     if (telephonyConfig.provider === "twilio") {
-      void preloadOpeningAudio(
-        call.id,
-        contact,
-        flow,
-        graph,
-        startStageId,
-        initialContext,
-      )
-        .then((openingClip) => {
-          logger.info(
-            { callId: call.id, durationMs: openingClip.durationMs },
-            "Preloaded opening audio",
-          );
-        })
-        .catch((err) => {
+      void (async () => {
+        try {
+          if (mode === "agent") {
+            const config = await getAgentConfig();
+            const sayText = config.openingTemplateHe.replace(
+              /\{\{customer_full_name\}\}/g,
+              contactFullName(contact.firstName, contact.familyName),
+            );
+            if (sayText.trim()) {
+              const clip = await synthesizeOpeningClip(call.id, contact, sayText);
+              preloadedOpeningClips.set(call.id, clip);
+              logger.info({ callId: call.id, durationMs: clip.durationMs }, "Preloaded agent opening audio");
+            }
+          } else {
+            const openingClip = await preloadOpeningAudio(
+              call.id,
+              contact,
+              flow,
+              graph,
+              startStageId,
+              initialContext,
+            );
+            logger.info(
+              { callId: call.id, durationMs: openingClip.durationMs },
+              "Preloaded opening audio",
+            );
+          }
+        } catch (err) {
           logger.error({ err, callId: call.id }, "Opening audio preload failed");
-        });
+        }
+      })();
     }
 
     if (provider.name === "mock") {
@@ -1078,7 +1141,7 @@ export async function startNextCall() {
 }
 
 /** Local test call — same flow/runtime as a real call, but audio via browser mic/speaker (no Twilio). */
-export async function startTestCall(contactId: string) {
+export async function startTestCall(contactId: string, options?: { skipVoice?: boolean }) {
   await recoverStuckContacts();
   await endActiveTestCallsForContact(contactId);
 
@@ -1086,12 +1149,17 @@ export async function startTestCall(contactId: string) {
   ensureCallable(contact.status);
 
   const flow = await getActiveCallFlow();
+  const mode = await getConversationMode();
   const graph = getPublishedGraphForCall(flow);
   const staged = parseStagedFlow(flow.stagesJson);
   const startStageId =
     graph?.startNodeId ?? staged?.stages[0]?.id ?? JSON.parse(flow.stagesJson)[0]?.id ?? "opening";
   const initialContext =
-    graph ? serializeGraphContext(initGraphContext(graph)) : "{}";
+    mode === "agent"
+      ? serializeAgentContext({ rejectionCount: 0 })
+      : graph
+        ? serializeGraphContext(initGraphContext(graph))
+        : "{}";
 
   const call = await prisma.call.create({
     data: {
@@ -1102,6 +1170,7 @@ export async function startTestCall(contactId: string) {
       currentNodeId: graph ? startStageId : undefined,
       currentSubflowId: null,
       contextJson: initialContext,
+      conversationMode: mode,
     },
   });
 
@@ -1109,6 +1178,9 @@ export async function startTestCall(contactId: string) {
     where: { id: call.id },
     data: { externalCallId: `test-${call.id}` },
   });
+
+  browserTestCallIds.add(call.id);
+  setBrowserTestSkipVoice(call.id, Boolean(options?.skipVoice));
 
   await transitionContactStatus(contactId, "in_call");
   broadcastCallEvent({ type: "call_status", callId: call.id, status: "connected" });
@@ -1142,6 +1214,9 @@ export async function updateCallStatus(
     activeSessions.delete(callId);
     voiceSessionsStarted.delete(callId);
     voiceKickoffStarted.delete(callId);
+    browserTestCallIds.delete(callId);
+    browserTestKickoffDone.delete(callId);
+    clearBrowserTestSkipVoice(callId);
     clearStagedSilence(callId);
     if (!isTestCall(call.externalCallId)) {
       unregisterBrowserSession(callId);
@@ -1219,6 +1294,15 @@ export async function prepareInitialVoiceTurn(
   }
 
   await updateCallStatus(callId, "connected");
+
+  if (call.conversationMode === "agent") {
+    activeSessions.set(callId, { session: { mode: "agent" } });
+    const turn = await prepareAgentOpening(callId, call.contact);
+    if (turn.sayText.trim()) {
+      await addTranscript(callId, "ai", turn.sayText);
+    }
+    return turn;
+  }
 
   const sessionEngine = createSessionEngine(call.callFlow);
   if (call.currentNodeId && sessionEngine.mode === "graph") {
@@ -1364,7 +1448,6 @@ export async function kickoffInitialVoice(callId: string): Promise<void> {
       const playbackMs = await speakOnCall(callId, turn.sayText, openingTts, ttsOpts);
       logger.info({ callId, playbackMs }, "Opening streamed on bidirectional media stream");
       scheduleGraphSilenceAfterPlayback(callId, playbackMs, "stream");
-      await flushPendingCustomerSpeech(callId);
       return;
     }
 
@@ -1391,6 +1474,25 @@ export async function processCustomerTurn(callId: string, text: string): Promise
   }
 
   clearStagedSilence(callId);
+
+  if (call.conversationMode === "agent") {
+    let session = activeSessions.get(callId);
+    if (!session) {
+      session = { session: { mode: "agent" } };
+      activeSessions.set(callId, session);
+    }
+
+    const isSilence = text.trim() === "";
+    if (!isSilence) {
+      await addTranscript(callId, "customer", text);
+    }
+
+    const turn = await processAgentTurn(callId, text, call.contact);
+    if (turn.sayText.trim()) {
+      await addTranscript(callId, "ai", turn.sayText);
+    }
+    return turn;
+  }
 
   let session = activeSessions.get(callId);
   if (!session) {
@@ -1820,14 +1922,33 @@ async function processLinearTurn(
 }
 
 export async function handleCustomerSpeech(callId: string, text: string) {
-  const prev = speechTurnChains.get(callId) ?? Promise.resolve();
-  const turn = prev.catch(() => {}).then(() => runCustomerSpeechTurn(callId, text));
-  speechTurnChains.set(callId, turn);
+  queuedCustomerSpeech.set(callId, text);
+
+  if (text.trim()) {
+    await interruptAiPlayback(callId);
+  }
+
+  let worker = customerSpeechWorkers.get(callId);
+  if (!worker) {
+    worker = drainCustomerSpeechQueue(callId);
+    customerSpeechWorkers.set(callId, worker);
+  }
+  await worker;
+}
+
+async function drainCustomerSpeechQueue(callId: string): Promise<void> {
   try {
-    await turn;
+    while (queuedCustomerSpeech.has(callId)) {
+      const next = queuedCustomerSpeech.get(callId)!;
+      queuedCustomerSpeech.delete(callId);
+      await runCustomerSpeechTurn(callId, next);
+    }
   } finally {
-    if (speechTurnChains.get(callId) === turn) {
-      speechTurnChains.delete(callId);
+    customerSpeechWorkers.delete(callId);
+    if (queuedCustomerSpeech.has(callId)) {
+      const followUp = drainCustomerSpeechQueue(callId);
+      customerSpeechWorkers.set(callId, followUp);
+      await followUp;
     }
   }
 }
@@ -1842,20 +1963,28 @@ async function runCustomerSpeechTurn(callId: string, text: string) {
     !callMeta.externalCallId.startsWith("mock-") &&
     !isTestCall(callMeta.externalCallId);
 
-  if (!text.trim() && shouldDeferForAiPlayback(callId)) {
-    deferGraphSilenceUntilAiDone(callId);
-    return;
-  }
-
   clearGraphSilence(callId);
   clearStagedSilence(callId);
   const session = activeSessions.get(callId);
 
-  if (isTwilio && !shouldDeferForAiPlayback(callId) && !isStreamingTtsOnCall(callId)) {
+  if (text.trim()) {
+    session?.tts?.abort();
+    if (isTwilio) {
+      await interruptTwilioPlay(callId);
+      clearAiPlayback(callId);
+    } else if (!isStreamingTtsOnCall(callId)) {
+      clearPlayback(callId);
+      stopBrowserPlayback(callId);
+      clearAiPlayback(callId);
+    }
+  } else if (shouldDeferForAiPlayback(callId)) {
+    deferGraphSilenceUntilAiDone(callId);
+    return;
+  } else if (isTwilio && !isStreamingTtsOnCall(callId)) {
     await interruptTwilioPlay(callId);
     session?.tts?.abort();
     clearAiPlayback(callId);
-  } else if (!shouldDeferForAiPlayback(callId) && !isStreamingTtsOnCall(callId)) {
+  } else if (!isStreamingTtsOnCall(callId)) {
     session?.tts?.abort();
     clearPlayback(callId);
     stopBrowserPlayback(callId);
@@ -1907,7 +2036,6 @@ async function runCustomerSpeechTurn(callId: string, text: string) {
     }
     if (!turn.endCall) {
       scheduleGraphSilenceAfterPlayback(callId, playbackMs, playbackKind);
-      await flushPendingCustomerSpeech(callId);
     }
     return;
   }
@@ -1966,7 +2094,7 @@ export { canRewindTestCall };
 
 export async function handleBargeIn(callId: string, audioChunk: Buffer | null) {
   if (audioChunk && audioChunk.length > 0 && !detectVoiceActivity(audioChunk)) return;
-  if (!isAiSpeaking(callId)) return;
+  if (!isAiSpeaking(callId) && !isStreamingTtsOnCall(callId)) return;
   await interruptAiPlayback(callId);
   logger.info({ callId }, "Barge-in: stopped AI playback to listen");
 }
@@ -2032,6 +2160,9 @@ export async function hangUpCall(callId: string): Promise<void> {
   activeSessions.delete(callId);
   voiceSessionsStarted.delete(callId);
   voiceKickoffStarted.delete(callId);
+  browserTestCallIds.delete(callId);
+  browserTestKickoffDone.delete(callId);
+  clearBrowserTestSkipVoice(callId);
   clearStagedSilence(callId);
   clearGraphSilence(callId);
   clearAiPlayback(callId);
@@ -2109,10 +2240,73 @@ export async function getActiveCall() {
   });
 }
 
+async function replayLastAiSpeechToBrowser(callId: string): Promise<void> {
+  const last = await prisma.callTranscriptSegment.findFirst({
+    where: { callId, speaker: "ai" },
+    orderBy: { timestamp: "desc" },
+  });
+  if (!last?.text.trim()) return;
+  const call = await prisma.call.findUnique({
+    where: { id: callId },
+    include: { contact: true },
+  });
+  await speakToBrowser(callId, last.text, false, {
+    addresseeSex: call?.contact?.sex,
+  });
+}
+
+/** First WS `start` prepares the opening; reconnects replay the latest AI line without re-advancing flow. */
+async function handleBrowserTestSessionStart(callId: string): Promise<void> {
+  if (browserTestKickoffInFlight.has(callId)) return;
+  if (!hasBrowserSession(callId)) return;
+
+  if (browserTestKickoffDone.has(callId)) {
+    await replayLastAiSpeechToBrowser(callId);
+    return;
+  }
+
+  const existingAi = await prisma.callTranscriptSegment.findFirst({
+    where: { callId, speaker: "ai" },
+    orderBy: { timestamp: "desc" },
+  });
+  if (existingAi?.text.trim()) {
+    browserTestKickoffDone.add(callId);
+    voiceSessionsStarted.add(callId);
+    await speakToBrowser(callId, existingAi.text, false, {
+      addresseeSex: (
+        await prisma.call.findUnique({
+          where: { id: callId },
+          include: { contact: true },
+        })
+      )?.contact?.sex,
+    });
+    return;
+  }
+
+  browserTestKickoffInFlight.add(callId);
+  try {
+    voiceSessionsStarted.add(callId);
+    const turn = await prepareInitialVoiceTurn(callId);
+    if (!turn.sayText.trim()) return;
+    const call = await prisma.call.findUnique({
+      where: { id: callId },
+      include: { contact: true },
+    });
+    const played = await speakToBrowser(callId, turn.sayText, false, {
+      addresseeSex: call?.contact?.sex,
+    });
+    if (played.played) {
+      browserTestKickoffDone.add(callId);
+    }
+  } finally {
+    browserTestKickoffInFlight.delete(callId);
+  }
+}
+
 registerVoiceHandlers({
   onCustomerSpeech: handleCustomerSpeech,
   onBargeIn: handleBargeIn,
-  isAiPlaybackActive: isAiSpeaking,
+  isAiPlaybackActive: (callId) => isAiSpeaking(callId) || isStreamingTtsOnCall(callId),
 });
 
 registerMediaStreamCallbacks({
@@ -2133,27 +2327,13 @@ registerMediaStreamCallbacks({
       }
     } catch (err) {
       logger.error({ err, callId }, "voice session setup failed");
-    } finally {
-      await flushPendingCustomerSpeech(callId);
     }
   },
 });
 
 registerBrowserTestHandlers({
   onCustomerSpeech: handleCustomerSpeech,
-  onSessionStart: async (callId) => {
-    if (voiceSessionsStarted.has(callId)) return;
-    voiceSessionsStarted.add(callId);
-    const turn = await prepareInitialVoiceTurn(callId);
-    if (!turn.sayText.trim()) return;
-    const call = await prisma.call.findUnique({
-      where: { id: callId },
-      include: { contact: true },
-    });
-    await speakToBrowser(callId, turn.sayText, false, {
-      addresseeSex: call?.contact?.sex,
-    });
-  },
+  onSessionStart: handleBrowserTestSessionStart,
   onSessionEnd: async (callId) => {
     voiceSessionsStarted.delete(callId);
   },

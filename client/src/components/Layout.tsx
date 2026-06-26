@@ -1,7 +1,9 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { OpenAiBalanceBadge } from "./OpenAiBalanceBadge";
+import { ConversationModeSwitch } from "./ConversationModeSwitch";
 import { ActiveTestCallProvider, useActiveTestCall } from "../context/ActiveTestCallContext";
+import { ConversationModeProvider } from "../context/ConversationModeContext";
 import { connectCallEvents } from "../api";
 
 const nav = [
@@ -9,6 +11,7 @@ const nav = [
   { to: "/contacts", label: "אנשי קשר" },
   { to: "/calls", label: "שיחות" },
   { to: "/sales", label: "הגדרות מכירה" },
+  { to: "/agent", label: "סוכן" },
   { to: "/flow-builder", label: "בניית זרימה" },
   { to: "/intents", label: "ניהול כוונות" },
   { to: "/settings", label: "הגדרות" },
@@ -16,9 +19,11 @@ const nav = [
 
 export function Layout() {
   return (
-    <ActiveTestCallProvider>
-      <LayoutShell />
-    </ActiveTestCallProvider>
+    <ConversationModeProvider>
+      <ActiveTestCallProvider>
+        <LayoutShell />
+      </ActiveTestCallProvider>
+    </ConversationModeProvider>
   );
 }
 
@@ -64,7 +69,10 @@ function LayoutShell() {
       <TunnelStatusBanner />
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-4">
-          <h1 className="text-xl font-bold text-blue-700">YES AI Caller</h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-xl font-bold text-blue-700">YES AI Caller</h1>
+            <ConversationModeSwitch />
+          </div>
           <div className="flex shrink-0 items-center gap-3">
             <ActiveCallChip />
             <OpenAiBalanceBadge />

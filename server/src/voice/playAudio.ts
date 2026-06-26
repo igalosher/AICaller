@@ -40,7 +40,7 @@ export async function createPlayClip(text: string, options?: TtsOptions): Promis
     clipIdByTextKey.delete(textKey);
   }
 
-  const buffer = await synthesizeHebrewSpeechMp3(text, options);
+  const { audio: buffer } = await synthesizeHebrewSpeechMp3(text, options);
   if (!buffer?.length) return null;
 
   const id = randomUUID();

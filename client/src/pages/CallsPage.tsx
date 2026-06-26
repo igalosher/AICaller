@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { isAxiosError } from "axios";
-import { callsApi, connectCallEvents, intentsApi } from "../api";
+import { callsApi, connectCallEvents, intentsApi, agentApi } from "../api";
 import { StatusBadge } from "../components/StatusBadge";
 import { TestCallAudioPanel } from "../context/ActiveTestCallContext";
 import type { Call, TranscriptSegment } from "../types";
@@ -62,6 +62,9 @@ export function CallsPage() {
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
   const [debugSegment, setDebugSegment] = useState<LiveSegment | null>(null);
   const [relabelIntent, setRelabelIntent] = useState("");
+  const [correctSegment, setCorrectSegment] = useState<LiveSegment | null>(null);
+  const [correctedText, setCorrectedText] = useState("");
+  const [customerContext, setCustomerContext] = useState("");
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
   const { data: calls } = useQuery({ queryKey: ["calls"], queryFn: callsApi.list });
@@ -78,6 +81,18 @@ export function CallsPage() {
   const { data: intents } = useQuery({ queryKey: ["intents"], queryFn: intentsApi.list });
 
   const displayCall = activeCall ?? selectedCall;
+  const isAgentCall = displayCall?.conversationMode === "agent";
+
+  const openCorrectModal = (segment: LiveSegment, index: number, transcript: LiveSegment[]) => {
+    const priorCustomer = [...transcript]
+      .slice(0, index)
+      .reverse()
+      .find((t) => t.speaker === "customer");
+    setCorrectSegment(segment);
+    setCorrectedText(segment.text);
+    setCustomerContext(priorCustomer?.text ?? "");
+  };
+
   const displayTranscript = useMemo(
     () =>
       mergeTranscript(
@@ -110,6 +125,23 @@ export function CallsPage() {
     },
   });
 
+  const correctMutation = useMutation({
+    mutationFn: () =>
+      agentApi.createExample({
+        customerText: customerContext.trim() || "(הקשר לא זמין)",
+        aiResponseBad: correctSegment!.text,
+        correctedText: correctedText.trim(),
+        callId: displayCall?.id,
+        segmentId: correctSegment?.segmentId,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agentExamples"] });
+      setCorrectSegment(null);
+      setCorrectedText("");
+      setCustomerContext("");
+    },
+  });
+
   useEffect(() => {
     setLiveTranscript([]);
   }, [activeCall?.id]);
@@ -122,6 +154,7 @@ export function CallsPage() {
     const ws = connectCallEvents((event) => {
       const e = event as {
         type: string;
+        status?: string;
         speaker?: string;
         text?: string;
         segmentId?: string;
@@ -223,6 +256,13 @@ export function CallsPage() {
             </h3>
             <div className="flex items-center gap-2">
               <StatusBadge status={displayCall.status} />
+              <span
+                className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                  isAgentCall ? "bg-violet-100 text-violet-800" : "bg-blue-100 text-blue-800"
+                }`}
+              >
+                {isAgentCall ? "סוכן" : "זרימה"}
+              </span>
               {isActiveCallLive && (
                 <button
                   type="button"
@@ -249,7 +289,18 @@ export function CallsPage() {
                 <p className="break-words">
                   <strong>{t.speaker === "ai" ? "AI" : "לקוח"}:</strong> {t.text}
                 </p>
-                {t.flowNodeId && (
+                {t.speaker === "ai" && isAgentCall && (
+                  <div className="mt-1">
+                    <button
+                      type="button"
+                      className="text-xs text-violet-700 underline"
+                      onClick={() => openCorrectModal(t, i, displayTranscript)}
+                    >
+                      תקן תגובה לסוכן
+                    </button>
+                  </div>
+                )}
+                {t.flowNodeId && !isAgentCall && (
                   <div className="mt-1">
                     <Link
                       to={`/flow-builder?focus=${encodeURIComponent(t.flowNodeId)}`}
@@ -280,6 +331,50 @@ export function CallsPage() {
               </div>
             ))}
             <div ref={transcriptEndRef} />
+          </div>
+        </div>
+      )}
+
+      {correctSegment && (
+        <div className="rounded-xl border border-violet-200 bg-violet-50 p-4 text-sm">
+          <h4 className="mb-2 font-semibold text-violet-900">תיקון תגובת סוכן</h4>
+          <p className="mb-2">
+            <strong>תגובה נוכחית:</strong> {correctSegment.text}
+          </p>
+          <label className="mb-3 block">
+            <span className="text-xs text-slate-600">מה הלקוח אמר (הקשר)</span>
+            <textarea
+              className="mt-1 w-full rounded border p-2 text-sm"
+              rows={2}
+              value={customerContext}
+              onChange={(e) => setCustomerContext(e.target.value)}
+            />
+          </label>
+          <label className="mb-3 block">
+            <span className="text-xs text-slate-600">תגובה מתוקנת (לשימוש עתידי)</span>
+            <textarea
+              className="mt-1 w-full rounded border p-2 text-sm"
+              rows={3}
+              value={correctedText}
+              onChange={(e) => setCorrectedText(e.target.value)}
+            />
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded bg-violet-600 px-3 py-1.5 text-white disabled:opacity-50"
+              disabled={correctMutation.isPending || !correctedText.trim()}
+              onClick={() => correctMutation.mutate()}
+            >
+              {correctMutation.isPending ? "שומר..." : "שמור דוגמה מאושרת"}
+            </button>
+            <button
+              type="button"
+              className="rounded border px-3 py-1.5"
+              onClick={() => setCorrectSegment(null)}
+            >
+              סגור
+            </button>
           </div>
         </div>
       )}

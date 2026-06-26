@@ -74,10 +74,16 @@ export async function getAiConfig(): Promise<AiConfig> {
 }
 
 export async function saveAiConfig(config: AiConfig) {
+  const existing = await getAiConfig();
+  const merged: AiConfig = {
+    openaiApiKey: config.openaiApiKey?.trim() || existing.openaiApiKey,
+    deepgramApiKey: config.deepgramApiKey?.trim() || existing.deepgramApiKey,
+    elevenLabsApiKey: config.elevenLabsApiKey?.trim() || existing.elevenLabsApiKey,
+  };
   await prisma.appSettings.upsert({
     where: { id: "default" },
-    create: { id: "default", aiConfig: encrypt(JSON.stringify(config)) },
-    update: { aiConfig: encrypt(JSON.stringify(config)) },
+    create: { id: "default", aiConfig: encrypt(JSON.stringify(merged)) },
+    update: { aiConfig: encrypt(JSON.stringify(merged)) },
   });
 }
 

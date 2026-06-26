@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { isAxiosError } from "axios";
 import { callsApi, contactsApi } from "../api";
 import { StatusBadge } from "../components/StatusBadge";
+import { readTestCallSkipVoice, writeTestCallSkipVoice } from "../testCallPrefs";
 import type { ContactSex, ContactStatus } from "../types";
 import { CONTACT_SEX_LABELS } from "../types";
 
@@ -49,6 +50,7 @@ export function ContactsPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [callingId, setCallingId] = useState<string | null>(null);
   const [testCallingId, setTestCallingId] = useState<string | null>(null);
+  const [testSkipVoice, setTestSkipVoice] = useState(readTestCallSkipVoice);
 
   const { data } = useQuery({
     queryKey: ["contacts", search, status],
@@ -89,12 +91,16 @@ export function ContactsPage() {
   });
 
   const testCallMutation = useMutation({
-    mutationFn: (contactId: string) => callsApi.startTest(contactId),
+    mutationFn: (contactId: string) =>
+      callsApi.startTest(contactId, { skipVoice: testSkipVoice }),
     onMutate: (contactId) => {
       setCallError(null);
       setTestCallingId(contactId);
     },
     onSuccess: (call) => {
+      if (call) {
+        qc.setQueryData(["activeCall"], call);
+      }
       qc.invalidateQueries({ queryKey: ["contacts"] });
       qc.invalidateQueries({ queryKey: ["calls"] });
       qc.invalidateQueries({ queryKey: ["activeCall"] });
@@ -164,6 +170,20 @@ export function ContactsPage() {
           {callError}
         </div>
       )}
+
+      <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+        <input
+          type="checkbox"
+          className="size-4 rounded border-emerald-400"
+          checked={testSkipVoice}
+          onChange={(e) => {
+            const next = e.target.checked;
+            setTestSkipVoice(next);
+            writeTestCallSkipVoice(next);
+          }}
+        />
+        שיחת טסט בלי דיבור (חוסך קרדיטים ElevenLabs)
+      </label>
 
       <div className="flex gap-3">
         <input

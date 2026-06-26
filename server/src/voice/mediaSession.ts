@@ -8,6 +8,9 @@ import { streamThinkingMulaw, type ThinkingSession } from "./thinkingSound.js";
 
 const MULAW_CHUNK_BYTES = 160; // 20 ms @ 8 kHz μ-law
 
+/** Minimum interim transcript length before barge-in (avoids noise false-positives). */
+const BARGE_IN_INTERIM_MIN_CHARS = 4;
+
 type SpeechHandler = (callId: string, text: string) => Promise<void>;
 type BargeInHandler = (callId: string, audio: Buffer | null) => Promise<void>;
 
@@ -41,7 +44,6 @@ interface MediaSession {
   lastFinalTranscript: string;
   lastFinalAt: number;
   thinking: ThinkingSession | null;
-  pendingTranscript?: string;
 }
 
 const sessions = new Map<string, MediaSession>();
@@ -89,26 +91,34 @@ async function createSttSession(callId: string): Promise<DeepgramSttSession | nu
 }
 
 async function onSttTranscript(callId: string, text: string, isFinal: boolean) {
-  if (!isFinal || !text.trim()) return;
+  const trimmed = text.trim();
+  if (!trimmed) return;
 
   const session = sessions.get(callId);
   if (!session) return;
 
-  const now = Date.now();
-  if (text === session.lastFinalTranscript && now - session.lastFinalAt < 3000) return;
+  const aiActive = isAiPlaybackActive(callId) || session.isSpeaking;
 
-  session.lastFinalTranscript = text;
-  session.lastFinalAt = now;
-
-  logger.info({ callId, text }, "Deepgram Hebrew transcript (final)");
-
-  if (isAiPlaybackActive(callId) || session.isSpeaking) {
-    session.pendingTranscript = text;
-    logger.info({ callId, text }, "Deferred transcript — AI is speaking");
+  if (!isFinal) {
+    if (aiActive && trimmed.length >= BARGE_IN_INTERIM_MIN_CHARS) {
+      await onBargeIn(callId, null);
+    }
     return;
   }
 
-  await onCustomerSpeech(callId, text);
+  const now = Date.now();
+  if (trimmed === session.lastFinalTranscript && now - session.lastFinalAt < 3000) return;
+
+  session.lastFinalTranscript = trimmed;
+  session.lastFinalAt = now;
+
+  logger.info({ callId, text: trimmed }, "Deepgram Hebrew transcript (final)");
+
+  if (aiActive) {
+    await onBargeIn(callId, null);
+  }
+
+  await onCustomerSpeech(callId, trimmed);
 }
 
 /** Pre-warm Deepgram STT so the first media stream does not block on connect. */
@@ -189,7 +199,6 @@ export async function handleTwilioMediaMessage(
     const track = message.media.track ?? "inbound";
     if (track === "inbound" || !message.media.track) {
       session.stt?.sendAudio(audio);
-      // Barge-in is driven by STT finals only — VAD during opening TwiML caused false interrupts.
     }
     return;
   }
@@ -269,7 +278,7 @@ export async function speakOnCall(
 
   stopThinkingOnCall(callId);
 
-  const audio = await synthesizeHebrewSpeech(text, options);
+  const { audio } = await synthesizeHebrewSpeech(text, options);
   if (!audio || tts.isAborted()) {
     logger.warn({ callId, hasAudio: Boolean(audio) }, "speakOnCall skipped — no TTS audio");
     return 0;
@@ -327,13 +336,5 @@ export async function waitForMediaSession(callId: string, maxMs = 10000): Promis
   return false;
 }
 
-/** Process customer speech that arrived while AI audio was playing (avoids aborting TTS). */
-export async function flushPendingCustomerSpeech(callId: string): Promise<void> {
-  const session = sessions.get(callId);
-  if (!session?.pendingTranscript?.trim()) return;
-  if (isAiPlaybackActive(callId) || session.isSpeaking) return;
-  const text = session.pendingTranscript;
-  session.pendingTranscript = undefined;
-  logger.info({ callId, text }, "Processing deferred transcript after AI playback");
-  await onCustomerSpeech(callId, text);
-}
+/** @deprecated Barge-in processes speech immediately; kept for callers after playback. */
+export async function flushPendingCustomerSpeech(_callId: string): Promise<void> {}
