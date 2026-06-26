@@ -97,6 +97,12 @@ export function createSigalMiniFlowGraph(): FlowGraph {
     "נשמח לבדוק עבורך היתכנות לתשתית סיבים אצלך בכתובת, מה הכתובת שלך? (עיר, רחוב, מספר בית, וכניסה אם יש)",
     { x: x - 200, y },
   );
+  const addressConfirm = b.stage(
+    "address_confirm",
+    "אישור כתובת",
+    "רשמתי {{CustomerAddress}}. האם הכתובת נכונה?",
+    { x: x - 200, y: y + 100 },
+  );
   const fiberYes = b.stage(
     "fiber_yes",
     "יש סיבים בכתובת",
@@ -209,12 +215,53 @@ export function createSigalMiniFlowGraph(): FlowGraph {
   b.link(inet.route, inet.speak, { intentId: "silence", label: "שתיקה" });
   b.link(inet.route, inet.speak, { isDefault: true, label: "חזרה על שאלה" });
 
-  // Address → fiber yes/no (callService maps provide_address → fiber_available / fiber_unavailable)
-  b.link(address.route, fiberYes.speak, { intentId: "fiber_available", label: "יש סיבים" });
-  b.link(address.route, fiberNo.speak, { intentId: "fiber_unavailable", label: "אין סיבים" });
+  // Address → confirm → fiber check (lookup runs only after customer confirms)
+  b.link(address.route, addressConfirm.speak, { intentId: "provide_address", label: "קיבלתי כתובת" });
   b.link(address.route, address.speak, { intentId: "silence", label: "שתיקה" });
   b.link(address.route, address.speak, { isDefault: true, label: "חזרה על שאלה" });
   b.link(address.route, "goodbye_blacklist", { intentId: "opt_out_remove", label: "הסר" });
+
+  b.route("route_fiber", "ניתוב זמינות סיבים", { x: x - 200, y: y + 280 });
+  b.nodes.push({
+    id: "decide_address_confirm",
+    type: "decision",
+    label: "אישור כתובת?",
+    position: { x: x - 200, y: y + 260 },
+  });
+
+  b.link(addressConfirm.route, "route_fiber", { intentId: "greeting_ack", label: "כן" });
+  b.link(addressConfirm.route, "route_fiber", { intentId: "agree_purchase", label: "מסכים" });
+  b.link(addressConfirm.route, address.speak, { intentId: "decline_callback", label: "לא" });
+  b.link(addressConfirm.route, address.speak, { intentId: "decline_addons", label: "לא תודה" });
+  b.link(addressConfirm.route, addressConfirm.speak, { intentId: "silence", label: "שתיקה" });
+  b.link(addressConfirm.route, "decide_address_confirm", { isDefault: true, label: "בדיקת תשובה" });
+
+  b.edges.push(
+    {
+      id: "e_decide_addr_yes",
+      source: "decide_address_confirm",
+      target: "route_fiber",
+      label: "כן",
+      condition: { op: "var_eq", variable: "AddressConfirmAnswerText", literal: "כן" },
+    },
+    {
+      id: "e_decide_addr_no",
+      source: "decide_address_confirm",
+      target: address.speak,
+      label: "לא",
+      condition: { op: "var_eq", variable: "AddressConfirmAnswerText", literal: "לא" },
+    },
+    {
+      id: "e_decide_addr_repeat",
+      source: "decide_address_confirm",
+      target: addressConfirm.speak,
+      isDefault: true,
+      label: "חזרה על שאלה",
+    },
+  );
+
+  b.link("route_fiber", fiberYes.speak, { intentId: "fiber_available", label: "יש סיבים" });
+  b.link("route_fiber", fiberNo.speak, { intentId: "fiber_unavailable", label: "אין סיבים" });
 
   // Informational announcements chain directly to the next question (no listen wait)
   b.link(fiberYes.speak, speedFiber.speak);
@@ -390,7 +437,7 @@ export function patchSigalFlowVariables(graph: FlowGraph): FlowGraph {
 
   const bindings = mergeAddressBinding({ ...graph, nodes });
 
-  return {
+  return patchSigalProductSideFlows({
     ...graph,
     nodes,
     variableBindings: bindings,
@@ -398,7 +445,74 @@ export function patchSigalFlowVariables(graph: FlowGraph): FlowGraph {
     lookupTables: graph.lookupTables ?? [],
     interruptQa: graph.interruptQa ?? true,
     sideFlows,
-  };
+  });
+}
+
+const PRODUCT_QA_INTENTS = [
+  "ask_channel",
+  "ask_packet",
+  "ask_internet",
+  "ask_router_rental",
+  "ask_options_compare",
+  "price_objection",
+] as const;
+
+export function patchSigalProductSideFlows(graph: FlowGraph): FlowGraph {
+  const speakId = "side_product_qa_speak";
+
+  let nodes = [...graph.nodes];
+  let edges = [...graph.edges];
+
+  if (!nodes.some((n) => n.id === speakId)) {
+    nodes.push({
+      id: speakId,
+      type: "speak",
+      label: "מוצרים: תשובה AI",
+      text: "עני בקצרה בעברית על חבילות טלוויזיה, ערוצים, אינטרנט, מבצעים ומחירים לפי הקטלוג. הזכירי רק מוצרים שקיימים בנתונים.",
+      useLlm: true,
+      returnsToMain: true,
+      position: { x: 1100, y: 50 },
+    });
+  } else {
+    nodes = nodes.map((n) =>
+      n.id === speakId && n.type === "speak"
+        ? {
+            ...n,
+            useLlm: (n as { useLlm?: boolean }).useLlm ?? true,
+            returnsToMain: true,
+          }
+        : n,
+    );
+  }
+
+  // Single-turn product Q&A: answer once, then resume main flow (no listen loop).
+  const legacyProductIds = new Set([
+    "side_product_qa_listen",
+    "side_product_qa_route",
+    "side_product_qa_farewell",
+  ]);
+  edges = edges.filter(
+    (e) =>
+      e.source !== speakId &&
+      e.target !== speakId &&
+      !legacyProductIds.has(e.source) &&
+      !legacyProductIds.has(e.target),
+  );
+  nodes = nodes.filter((n) => !legacyProductIds.has(n.id));
+
+  const sideFlows = [...(graph.sideFlows ?? [])];
+  for (const intentId of PRODUCT_QA_INTENTS) {
+    if (!sideFlows.some((sf) => sf.intentId === intentId)) {
+      sideFlows.push({
+        id: `sf_product_${intentId}`,
+        intentId,
+        entryNodeId: speakId,
+        label: `שאלת מוצרים (${intentId})`,
+      });
+    }
+  }
+
+  return { ...graph, nodes, edges, sideFlows };
 }
 
 function mergeAddressBinding(graph: FlowGraph): FlowVariableBinding[] {
@@ -418,6 +532,16 @@ function mergeAddressBinding(graph: FlowGraph): FlowVariableBinding[] {
     bindings.push({
       listenNodeId: "listen_address",
       variableName: "CustomerAddress",
+      source: "raw_text",
+    });
+  }
+  if (
+    !bindings.some((b) => b.listenNodeId === "listen_address_confirm") &&
+    graph.nodes.some((n) => n.id === "listen_address_confirm")
+  ) {
+    bindings.push({
+      listenNodeId: "listen_address_confirm",
+      variableName: "AddressConfirmAnswerText",
       source: "raw_text",
     });
   }
@@ -465,6 +589,7 @@ function mergeAddressBinding(graph: FlowGraph): FlowVariableBinding[] {
 const DEFAULT_FLOW_VARIABLES: Record<string, FlowVariableDef> = {
   NumOfTVs: { name: "NumOfTVs", type: "int", defaultValue: 0 },
   CustomerAddress: { name: "CustomerAddress", type: "string", defaultValue: "" },
+  AddressConfirmAnswerText: { name: "AddressConfirmAnswerText", type: "string", defaultValue: "" },
   MonthlyPrice: { name: "MonthlyPrice", type: "int", defaultValue: 0 },
   PriceAnswerText: { name: "PriceAnswerText", type: "string", defaultValue: "" },
   SpeedAnswerText: { name: "SpeedAnswerText", type: "string", defaultValue: "" },
@@ -533,6 +658,9 @@ export function ensureFlowVariables(graph: FlowGraph): FlowVariableDef[] {
 
   if (graph.nodes.some((n) => n.id === "listen_address")) {
     ensure("CustomerAddress");
+  }
+  if (graph.nodes.some((n) => n.id === "listen_address_confirm")) {
+    ensure("AddressConfirmAnswerText");
   }
   const hasTvVariable = variables.some(
     (v) => v.name === TV_COUNT_CANONICAL || TV_COUNT_ALIASES.has(v.name),
@@ -681,28 +809,43 @@ export function patchSigalGraphRouting(graph: FlowGraph): FlowGraph {
     }
   }
 
-  if (nodes.some((n) => n.id === "route_tv") && tvSpeak) {
-    edges = edges
-      .filter(
-        (e) =>
-          !(
-            e.source === "route_tv" &&
-            e.intentId === "greeting_ack" &&
-            e.target === "speak_hi"
-          ),
-      )
-      .map((e) =>
-        e.source === "route_tv" && e.intentId === "greeting_ack" && e.target === "speak_hi"
-          ? { ...e, target: tvSpeak, label: e.label ?? "המשך" }
-          : e,
-      );
-    if (!edges.some((e) => e.source === "route_tv" && e.intentId === "greeting_ack")) {
+  if (nodes.some((n) => n.id === "route_tv")) {
+    const tvRepeat =
+      nodes.some((n) => n.id === "speak_opening")
+        ? "speak_opening"
+        : tvSpeak;
+    if (tvSpeak) {
+      edges = edges
+        .filter(
+          (e) =>
+            !(
+              e.source === "route_tv" &&
+              e.intentId === "greeting_ack" &&
+              e.target === "speak_hi"
+            ),
+        )
+        .map((e) =>
+          e.source === "route_tv" && e.intentId === "greeting_ack" && e.target === "speak_hi"
+            ? { ...e, target: tvSpeak, label: e.label ?? "המשך" }
+            : e,
+        );
+      if (!edges.some((e) => e.source === "route_tv" && e.intentId === "greeting_ack")) {
+        edges.push({
+          id: "e_route_tv_greeting_ack",
+          source: "route_tv",
+          target: tvSpeak,
+          intentId: "greeting_ack",
+          label: "המשך",
+        });
+      }
+    }
+    if (tvRepeat && !edges.some((e) => e.source === "route_tv" && e.intentId === "greeting_hi")) {
       edges.push({
-        id: "e_route_tv_greeting_ack",
+        id: "e_route_tv_greeting_hi",
         source: "route_tv",
-        target: tvSpeak,
-        intentId: "greeting_ack",
-        label: "המשך",
+        target: tvRepeat,
+        intentId: "greeting_hi",
+        label: "ברכה — חזרה על שאלה",
       });
     }
   }
@@ -952,12 +1095,148 @@ export function patchSigalCallbackRouting(graph: FlowGraph): FlowGraph {
   return { ...graph, nodes, edges };
 }
 
+const ADDRESS_CONFIRM_SPEAK_TEXT = "רשמתי {{CustomerAddress}}. האם הכתובת נכונה?";
+
+/** After address: repeat it back, confirm yes/no, re-ask on no, then fiber lookup. */
+export function patchSigalAddressConfirmRouting(graph: FlowGraph): FlowGraph {
+  if (!isSigalMiniFlowGraph(graph)) return graph;
+  if (!graph.nodes.some((n) => n.id === "listen_address")) return graph;
+
+  let nodes = [...graph.nodes];
+  let edges = [...graph.edges];
+
+  const addressSpeak = nodes.find((n) => n.id === "speak_address");
+  const pos = addressSpeak?.position ?? { x: 120, y: 440 };
+
+  if (!nodes.some((n) => n.id === "speak_address_confirm")) {
+    nodes.push(
+      {
+        id: "speak_address_confirm",
+        type: "speak",
+        label: "אישור כתובת",
+        text: ADDRESS_CONFIRM_SPEAK_TEXT,
+        position: { x: pos.x, y: (pos.y ?? 0) + 100 },
+      },
+      {
+        id: "listen_address_confirm",
+        type: "listen",
+        label: "האזנה: אישור כתובת",
+        position: { x: pos.x, y: (pos.y ?? 0) + 180 },
+      },
+      {
+        id: "route_address_confirm",
+        type: "intent_route",
+        label: "ניתוב: אישור כתובת",
+        position: { x: pos.x, y: (pos.y ?? 0) + 260 },
+      },
+    );
+    edges.push(
+      { id: "e_speak_address_confirm_listen", source: "speak_address_confirm", target: "listen_address_confirm" },
+      { id: "e_listen_address_confirm_route", source: "listen_address_confirm", target: "route_address_confirm" },
+    );
+  } else {
+    nodes = nodes.map((n) =>
+      n.id === "speak_address_confirm" && n.type === "speak"
+        ? { ...n, text: ADDRESS_CONFIRM_SPEAK_TEXT, label: n.label ?? "אישור כתובת" }
+        : n,
+    );
+  }
+
+  if (!nodes.some((n) => n.id === "route_fiber")) {
+    nodes.push({
+      id: "route_fiber",
+      type: "intent_route",
+      label: "ניתוב זמינות סיבים",
+      position: { x: pos.x, y: (pos.y ?? 0) + 340 },
+    });
+  }
+
+  if (!nodes.some((n) => n.id === "decide_address_confirm")) {
+    nodes.push({
+      id: "decide_address_confirm",
+      type: "decision",
+      label: "אישור כתובת?",
+      position: { x: pos.x, y: (pos.y ?? 0) + 320 },
+    });
+  }
+
+  edges = edges.filter(
+    (e) =>
+      !(
+        e.source === "route_address" &&
+        (e.intentId === "fiber_available" || e.intentId === "fiber_unavailable")
+      ),
+  );
+
+  const ensureRoute = (source: string, intentId: string | undefined, target: string, label: string, isDefault?: boolean) => {
+    const existing = edges.find(
+      (e) => e.source === source && e.intentId === intentId && Boolean(e.isDefault) === Boolean(isDefault),
+    );
+    if (existing) {
+      edges = edges.map((e) => (e.id === existing.id ? { ...e, target, label } : e));
+    } else {
+      edges.push({
+        id: `e_${source}_${intentId ?? "default"}_${target}`,
+        source,
+        target,
+        intentId,
+        label,
+        isDefault,
+      });
+    }
+  };
+
+  ensureRoute("route_address", "provide_address", "speak_address_confirm", "קיבלתי כתובת");
+  ensureRoute("route_address", "silence", "speak_address", "שתיקה");
+  ensureRoute("route_address", undefined, "speak_address", "חזרה על שאלה", true);
+
+  ensureRoute("route_address_confirm", "greeting_ack", "route_fiber", "כן");
+  ensureRoute("route_address_confirm", "agree_purchase", "route_fiber", "מסכים");
+  ensureRoute("route_address_confirm", "decline_callback", "speak_address", "לא");
+  ensureRoute("route_address_confirm", "decline_addons", "speak_address", "לא תודה");
+  ensureRoute("route_address_confirm", "silence", "speak_address_confirm", "שתיקה");
+  ensureRoute("route_address_confirm", undefined, "decide_address_confirm", "בדיקת תשובה", true);
+
+  ensureRoute("route_fiber", "fiber_available", "speak_fiber_yes", "יש סיבים");
+  ensureRoute("route_fiber", "fiber_unavailable", "speak_fiber_no", "אין סיבים");
+
+  edges = edges.filter((e) => e.source !== "decide_address_confirm");
+  edges.push(
+    {
+      id: "e_decide_addr_yes",
+      source: "decide_address_confirm",
+      target: "route_fiber",
+      label: "כן",
+      condition: { op: "var_eq", variable: "AddressConfirmAnswerText", literal: "כן" },
+    },
+    {
+      id: "e_decide_addr_no",
+      source: "decide_address_confirm",
+      target: "speak_address",
+      label: "לא",
+      condition: { op: "var_eq", variable: "AddressConfirmAnswerText", literal: "לא" },
+    },
+    {
+      id: "e_decide_addr_repeat",
+      source: "decide_address_confirm",
+      target: "speak_address_confirm",
+      isDefault: true,
+      label: "חזרה על שאלה",
+    },
+  );
+
+  const withBindings = patchSigalFlowVariables({ ...graph, nodes, edges, interruptQa: false });
+  return withBindings;
+}
+
 export function enhanceSigalGraph(graph: FlowGraph): FlowGraph {
   return patchSigalFlowVariables(
     patchConsolidateTvVariables(
-      patchSigalCallbackRouting(
-        patchSigalSpeedRouting(
-          patchSigalPriceRouting(patchSigalAutoAdvanceSpeaks(patchSigalGraphRouting(graph))),
+      patchSigalAddressConfirmRouting(
+        patchSigalCallbackRouting(
+          patchSigalSpeedRouting(
+            patchSigalPriceRouting(patchSigalAutoAdvanceSpeaks(patchSigalGraphRouting(graph))),
+          ),
         ),
       ),
     ),

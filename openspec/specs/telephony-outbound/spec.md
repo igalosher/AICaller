@@ -4,11 +4,15 @@
 TBD - created by archiving change yes-ai-sales-caller. Update Purpose after archive.
 ## Requirements
 ### Requirement: Outbound call initiation
-The system SHALL place outbound phone calls to contacts on the closed list using a configured telephony provider.
+The system SHALL place outbound phone calls to contacts on the closed list using a configured telephony provider. On Twilio, the dial SHALL be initiated **immediately** after webhook reachability is confirmed; opening TTS MAY continue rendering in the background after the dial starts.
 
 #### Scenario: Call single contact
 - **WHEN** an operator clicks "התקשר" on a contact with status other than `refused` or `blacklisted`
 - **THEN** the system initiates an outbound call to the contact's phone number and connects the AI voice pipeline
+
+#### Scenario: Phone rings before opening TTS finishes
+- **WHEN** an operator starts a Twilio call and opening MP3 synthesis takes several seconds
+- **THEN** Twilio begins ringing the callee without waiting for opening synthesis to complete
 
 #### Scenario: Call refused or blacklisted contact blocked
 - **WHEN** an operator attempts to call a contact with status `refused` or `blacklisted`
@@ -22,15 +26,37 @@ Operators SHALL be able to call the next eligible contact (status `pending` or `
 - **THEN** the system selects the next eligible contact and initiates the call
 
 ### Requirement: Call state management
-The system SHALL track call states: `dialing`, `ringing`, `connected`, `ended`, `failed`, `no_answer`, `busy`.
+The system SHALL track call states: `dialing`, `ringing`, `connected`, `ended`, `failed`, `no_answer`, `busy`. Terminal states (`busy`, `failed`, `no_answer`, `ended`) SHALL NOT be overwritten by later `ringing` updates from a slow API response.
 
 #### Scenario: No answer handling
 - **WHEN** a call rings out with no answer
 - **THEN** the call state is recorded as `no_answer`, the contact remains `pending` or moves to `callback` per configuration
 
+#### Scenario: Busy line feedback
+- **WHEN** Twilio reports `busy` for an outbound call
+- **THEN** the call state is `busy`, the contact returns to `pending`, and the operator UI shows a Hebrew message that the line was busy or the call was declined
+
 #### Scenario: Connected call bridges AI
 - **WHEN** the callee answers
 - **THEN** the telephony layer bridges audio bidirectionally to the Hebrew voice AI pipeline
+
+### Requirement: Twilio trial caller ID
+When placing outbound Twilio calls to a **verified** destination number on a trial account, the system SHALL use that verified number as the `From` caller ID when it matches the destination, improving pickup on Israeli mobiles versus a default US Twilio number.
+
+#### Scenario: Verified Israeli destination
+- **WHEN** the callee number is listed in Twilio verified caller IDs
+- **THEN** `calls.create` uses the verified Israeli E.164 as `From` when calling that number
+
+### Requirement: Local dev Twilio tunnel
+Local development with `npm run dev:twilio` SHALL run **cloudflared** alongside the server, write `TWILIO_WEBHOOK_BASE_URL` and `DEV_TWILIO_TUNNEL=1` to `server/.env`, sync the URL to settings, and **restart cloudflared** automatically if the tunnel disconnects. The server SHALL NOT spawn a competing tunnel when `DEV_TWILIO_TUNNEL=1` and the public URL is dead; it SHALL instruct the operator to restart `dev:twilio`.
+
+#### Scenario: Tunnel URL synced on start
+- **WHEN** `dev:twilio` assigns a new trycloudflare URL
+- **THEN** `.env`, database telephony settings, and Twilio voice webhooks use that URL
+
+#### Scenario: Stale tunnel on call
+- **WHEN** `DEV_TWILIO_TUNNEL=1`, the server is up, but the configured webhook URL is unreachable
+- **THEN** starting a call fails with a Hebrew message to restart `npm run dev:twilio`
 
 ### Requirement: Telephony provider configuration
 Operators SHALL configure telephony credentials (provider API keys, caller ID number, webhook URLs) through a secure settings screen.
@@ -40,15 +66,19 @@ Operators SHALL configure telephony credentials (provider API keys, caller ID nu
 - **THEN** credentials are stored encrypted and test-call functionality becomes available
 
 ### Requirement: Active call monitoring
-During an active call, operators SHALL see real-time status (duration, current stage or graph node, live transcript snippet) in the UI. Transcript lines SHALL include `flowNodeId` when available for flow-builder navigation.
+During an active call, operators SHALL see real-time status (duration, current stage or graph node, live transcript snippet, and **call status badge**) in the UI. Transcript lines SHALL include `flowNodeId` when available for flow-builder navigation.
 
 #### Scenario: Monitor active call
 - **WHEN** a call is connected on a staged flow
-- **THEN** the operator UI shows call duration, current `currentStageId`, and rolling transcript updates
+- **THEN** the operator UI shows call duration, current `currentStageId`, status badge, and rolling transcript updates
 
 #### Scenario: Monitor graph call with node links
 - **WHEN** a call is connected on a graph flow
 - **THEN** each new AI transcript line includes `flowNodeId` for the speak node that produced it
+
+#### Scenario: Busy call clears active monitor
+- **WHEN** a call transitions to `busy`
+- **THEN** the active-call panel clears and the operator sees the busy status message
 
 ### Requirement: Manual takeover (future-ready)
 The architecture SHALL support operator manual takeover of an active call (listen-only in v1; full handoff as optional enhancement).

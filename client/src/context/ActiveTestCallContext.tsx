@@ -19,6 +19,8 @@ type ServerMessage =
   | { type: "play"; mime: string; audio: string }
   | { type: "stop_playback" }
   | { type: "speak_skipped" }
+  | { type: "thinking_start" }
+  | { type: "thinking_stop" }
   | { type: "hangup" }
   | { type: "error"; message: string };
 
@@ -96,13 +98,42 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const playbackSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const thinkingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const intentionalCloseRef = useRef(false);
+
+  const stopThinking = useCallback(() => {
+    if (thinkingTimerRef.current) {
+      clearInterval(thinkingTimerRef.current);
+      thinkingTimerRef.current = null;
+    }
+  }, []);
+
+  const startThinking = useCallback(async () => {
+    const ctx = audioCtxRef.current ?? new AudioContext();
+    audioCtxRef.current = ctx;
+    await ctx.resume();
+    stopThinking();
+    let tick = 0;
+    thinkingTimerRef.current = setInterval(() => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = [392, 494, 587][tick % 3] ?? 440;
+      gain.gain.value = 0.045;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.2);
+      tick += 1;
+    }, 750);
+  }, [stopThinking]);
 
   const stopPlayback = useCallback(() => {
     playbackSourceRef.current?.stop();
     playbackSourceRef.current = null;
+    stopThinking();
     setIsPlaying(false);
-  }, []);
+  }, [stopThinking]);
 
   const finishPlayback = useCallback(() => {
     playbackSourceRef.current = null;
@@ -269,6 +300,14 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
             stopPlayback();
             return;
           }
+          if (msg.type === "thinking_start") {
+            void startThinking();
+            return;
+          }
+          if (msg.type === "thinking_stop") {
+            stopThinking();
+            return;
+          }
           if (msg.type === "speak_skipped") {
             finishPlayback();
             return;
@@ -323,7 +362,7 @@ export function ActiveTestCallProvider({ children }: { children: ReactNode }) {
       intentionalCloseRef.current = true;
       cleanup();
     };
-  }, [testCallId, finishPlayback, stopPlayback, qc]);
+  }, [testCallId, finishPlayback, stopPlayback, startThinking, stopThinking, qc]);
 
   const value: ActiveTestCallContextValue = {
     callId: testCallId,
@@ -361,6 +400,14 @@ export function TestCallAudioPanel({ showWhenIdle = false }: { showWhenIdle?: bo
     rewinding,
     rewindStep,
   } = useActiveTestCall();
+
+  const replyInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (status === "ready" && !sending && !isPlaying) {
+      requestAnimationFrame(() => replyInputRef.current?.focus());
+    }
+  }, [status, sending, isPlaying]);
 
   if (!isTestCallActive && !showWhenIdle) return null;
 
@@ -426,6 +473,7 @@ export function TestCallAudioPanel({ showWhenIdle = false }: { showWhenIdle?: bo
       {canReply && (
         <form className="mt-3 flex gap-2" onSubmit={onSubmit}>
           <input
+            ref={replyInputRef}
             type="text"
             className="min-w-0 flex-1 rounded border border-emerald-300 bg-white px-3 py-2 text-sm text-slate-900"
             placeholder="הקלידו את תשובת הלקוח..."
@@ -434,6 +482,7 @@ export function TestCallAudioPanel({ showWhenIdle = false }: { showWhenIdle?: bo
             onKeyDown={onKeyDown}
             disabled={sending}
             dir="rtl"
+            autoFocus
           />
           <button
             type="submit"

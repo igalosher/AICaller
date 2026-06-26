@@ -1,6 +1,6 @@
 import type { FlowGraph, FlowVariableDef, FlowVariableType } from "./graphTypes.js";
 import { listLookupColumns, parseLookupRows, validateLookupTableSize } from "./lookupQuery.js";
-import { collectSideFlowSpeakNodes } from "./sideFlowRuntime.js";
+import { collectSideFlowSpeakNodes, sideFlowNodeIds } from "./sideFlowRuntime.js";
 
 export interface ValidationError {
   messageHe: string;
@@ -196,12 +196,7 @@ export function validateFlowGraph(graph: FlowGraph): ValidationError[] {
     }
   }
 
-  const exemptFromReachability = new Set<string>();
-  for (const sf of graph.sideFlows ?? []) {
-    for (const speak of collectSideFlowSpeakNodes(graph, sf.entryNodeId)) {
-      exemptFromReachability.add(speak.id);
-    }
-  }
+  const exemptFromReachability = sideFlowNodeIds(graph);
 
   if (graph.startNodeId) {
     const reachable = new Set<string>();

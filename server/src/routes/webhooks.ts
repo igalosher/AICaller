@@ -2,11 +2,18 @@ import { Router } from "express";
 import {
   updateCallStatus,
   onCallConnected,
-  kickoffInitialVoice,
   peekPreloadedOpening,
+  ensureOpeningClipForAnswer,
+  markOpeningPlaybackStarted,
 } from "../services/callService.js";
 import { getPlayClip } from "../voice/playAudio.js";
-import { buildAnswerWithPlayTwiml, buildHoldTwiml } from "../voice/twilioPlay.js";
+import {
+  buildAnswerHoldTwiml,
+  buildAnswerWithPlayTwiml,
+  buildPauseOnlyTwiml,
+  playPreloadedOnTwilioCall,
+} from "../voice/twilioPlay.js";
+import { logger } from "../logger.js";
 import type { CallOutcome, CallStatus } from "@prisma/client";
 
 const router = Router();
@@ -30,16 +37,44 @@ router.post("/twilio/voice", async (req, res) => {
     return;
   }
 
-  // Answer immediately. If opening audio was preloaded, play it in the same TwiML that
-  // starts the media stream (one stream for the whole call — never restart on each play).
-  const preloaded = peekPreloadedOpening(callId);
+  if (callId === "healthcheck") {
+    res.type("text/xml");
+    res.send(buildPauseOnlyTwiml());
+    return;
+  }
+
+  logger.info({ callId, callSid: req.body.CallSid }, "Twilio voice webhook hit");
+
+  const opening = peekPreloadedOpening(callId);
+  if (opening) {
+    markOpeningPlaybackStarted(callId, opening.durationMs);
+    logger.info(
+      { callId, clipId: opening.clipId, durationMs: opening.durationMs },
+      "Twilio answer webhook — returning opening Play TwiML",
+    );
+    res.type("text/xml");
+    res.send(await buildAnswerWithPlayTwiml(callId, opening.clipId));
+    return;
+  }
+
+  logger.warn({ callId }, "Opening clip not ready at answer — holding call while rendering");
   res.type("text/xml");
-  res.send(
-    preloaded
-      ? await buildAnswerWithPlayTwiml(callId, preloaded.clipId)
-      : await buildHoldTwiml(callId),
-  );
-  void kickoffInitialVoice(callId);
+  res.send(await buildAnswerHoldTwiml(callId));
+
+  void (async () => {
+    try {
+      const ensured = await ensureOpeningClipForAnswer(callId);
+      if (!ensured) {
+        logger.error({ callId }, "No opening audio after answer — caller will hear silence");
+        return;
+      }
+      markOpeningPlaybackStarted(callId, ensured.durationMs);
+      await playPreloadedOnTwilioCall(callId, ensured.clipId, false, ensured.durationMs);
+      logger.info({ callId, clipId: ensured.clipId }, "Deferred opening audio queued on Twilio call");
+    } catch (err) {
+      logger.error({ err, callId }, "Deferred opening audio failed");
+    }
+  })();
 });
 
 router.post("/twilio/status", async (req, res, next) => {
@@ -49,6 +84,7 @@ router.post("/twilio/status", async (req, res, next) => {
     const map: Record<string, CallStatus> = {
       initiated: "dialing",
       ringing: "ringing",
+      answered: "connected",
       "in-progress": "connected",
       completed: "ended",
       busy: "busy",
@@ -63,6 +99,16 @@ router.post("/twilio/status", async (req, res, next) => {
       canceled: "no_answer",
     };
     if (callId && map[status]) {
+      logger.info(
+        { callId, twilioStatus: status, to: req.body.To, from: req.body.From },
+        "Twilio status callback",
+      );
+      if (status === "busy") {
+        logger.warn(
+          { callId, to: req.body.To },
+          "Callee line busy — call never reached voice webhook (check phone is free and not blocking +1 caller ID)",
+        );
+      }
       await updateCallStatus(callId, map[status], outcomeMap[status]);
       if (status === "in-progress") {
         void onCallConnected(callId);

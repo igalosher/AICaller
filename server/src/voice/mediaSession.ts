@@ -4,22 +4,26 @@ import { logger } from "../logger.js";
 import { DeepgramSttSession } from "./deepgramStt.js";
 import { synthesizeHebrewSpeech, type TtsOptions } from "./tts.js";
 import type { TtsSession } from "./tts.js";
+import { streamThinkingMulaw, type ThinkingSession } from "./thinkingSound.js";
 
 const MULAW_CHUNK_BYTES = 160; // 20 ms @ 8 kHz μ-law
 
 type SpeechHandler = (callId: string, text: string) => Promise<void>;
-type BargeInHandler = (callId: string, audio: Buffer) => Promise<void>;
+type BargeInHandler = (callId: string, audio: Buffer | null) => Promise<void>;
 
 let onCustomerSpeech: SpeechHandler = async () => {};
 let onBargeIn: BargeInHandler = async () => {};
 let onStreamStart: (callId: string) => Promise<void> = async () => {};
+let isAiPlaybackActive: (callId: string) => boolean = () => false;
 
 export function registerVoiceHandlers(handlers: {
   onCustomerSpeech: SpeechHandler;
   onBargeIn: BargeInHandler;
+  isAiPlaybackActive?: (callId: string) => boolean;
 }): void {
   onCustomerSpeech = handlers.onCustomerSpeech;
   onBargeIn = handlers.onBargeIn;
+  isAiPlaybackActive = handlers.isAiPlaybackActive ?? (() => false);
 }
 
 export function registerMediaStreamCallbacks(handlers: {
@@ -36,7 +40,8 @@ interface MediaSession {
   isSpeaking: boolean;
   lastFinalTranscript: string;
   lastFinalAt: number;
-  processingSpeech: boolean;
+  thinking: ThinkingSession | null;
+  pendingTranscript?: string;
 }
 
 const sessions = new Map<string, MediaSession>();
@@ -91,18 +96,34 @@ async function onSttTranscript(callId: string, text: string, isFinal: boolean) {
 
   const now = Date.now();
   if (text === session.lastFinalTranscript && now - session.lastFinalAt < 3000) return;
-  if (session.processingSpeech) return;
 
   session.lastFinalTranscript = text;
   session.lastFinalAt = now;
-  session.processingSpeech = true;
 
   logger.info({ callId, text }, "Deepgram Hebrew transcript (final)");
 
+  if (isAiPlaybackActive(callId) || session.isSpeaking) {
+    session.pendingTranscript = text;
+    logger.info({ callId, text }, "Deferred transcript — AI is speaking");
+    return;
+  }
+
+  await onCustomerSpeech(callId, text);
+}
+
+/** Pre-warm Deepgram STT so the first media stream does not block on connect. */
+export async function warmDeepgramStt(): Promise<void> {
+  const config = await getAiConfig();
+  if (!config.deepgramApiKey) return;
+
+  const stt = new DeepgramSttSession(config.deepgramApiKey, () => {});
   try {
-    await onCustomerSpeech(callId, text);
+    await stt.connect();
+    logger.info("Deepgram STT warm-up complete");
+  } catch (err) {
+    logger.warn({ err }, "Deepgram STT warm-up failed");
   } finally {
-    session.processingSpeech = false;
+    stt.close();
   }
 }
 
@@ -124,27 +145,37 @@ export async function handleTwilioMediaMessage(
       logger.error({ message }, "Twilio media stream start missing callId or streamSid");
       return;
     }
+    const startedCallId = callId;
 
-    const existing = sessions.get(callId);
+    const existing = sessions.get(startedCallId);
     if (existing) {
       existing.stt?.close();
+      existing.thinking?.stop();
       wsToCallId.delete(existing.twilioWs);
     }
 
-    const stt = await createSttSession(callId);
-    wsToCallId.set(twilioWs, callId);
-    sessions.set(callId, {
-      callId,
+    wsToCallId.set(twilioWs, startedCallId);
+    sessions.set(startedCallId, {
+      callId: startedCallId,
       streamSid,
       twilioWs,
-      stt,
+      stt: null,
       isSpeaking: false,
       lastFinalTranscript: "",
       lastFinalAt: 0,
-      processingSpeech: false,
+      thinking: null,
     });
-    logger.info({ callId, streamSid, hasStt: Boolean(stt) }, "Twilio media stream started (Deepgram he)");
-    void onStreamStart(callId);
+    logger.info({ callId: startedCallId, streamSid }, "Twilio media stream started (Deepgram he)");
+    void onStreamStart(startedCallId);
+
+    void createSttSession(startedCallId).then((stt) => {
+      const session = sessions.get(startedCallId);
+      if (session && session.twilioWs === twilioWs) {
+        session.stt = stt;
+      } else {
+        stt?.close();
+      }
+    });
     return;
   }
 
@@ -158,9 +189,7 @@ export async function handleTwilioMediaMessage(
     const track = message.media.track ?? "inbound";
     if (track === "inbound" || !message.media.track) {
       session.stt?.sendAudio(audio);
-      if (session.isSpeaking) {
-        await onBargeIn(callId, audio);
-      }
+      // Barge-in is driven by STT finals only — VAD during opening TwiML caused false interrupts.
     }
     return;
   }
@@ -175,6 +204,7 @@ export async function handleTwilioMediaMessage(
 export function unregisterMediaStream(callId: string): void {
   const session = sessions.get(callId);
   if (!session) return;
+  session.thinking?.stop();
   session.stt?.close();
   sessions.delete(callId);
   wsToCallId.delete(session.twilioWs);
@@ -199,25 +229,59 @@ export function clearPlayback(callId: string): void {
   session.isSpeaking = false;
 }
 
+export function stopThinkingOnCall(callId: string): void {
+  const session = sessions.get(callId);
+  if (!session) return;
+  session.thinking?.stop();
+  session.thinking = null;
+  clearPlayback(callId);
+}
+
+export function startThinkingOnCall(callId: string): void {
+  const session = sessions.get(callId);
+  if (!session?.streamSid || session.twilioWs.readyState !== 1 || session.isSpeaking) return;
+
+  stopThinkingOnCall(callId);
+  session.thinking = streamThinkingMulaw(
+    (chunk) => {
+      if (!session.thinking || session.isSpeaking || session.twilioWs.readyState !== 1) return false;
+      session.twilioWs.send(
+        JSON.stringify({
+          event: "media",
+          streamSid: session.streamSid,
+          media: { payload: chunk.toString("base64") },
+        }),
+      );
+      return true;
+    },
+    () => !session.thinking || session.isSpeaking,
+  );
+}
+
 export async function speakOnCall(
   callId: string,
   text: string,
   tts: TtsSession,
   options?: TtsOptions,
-): Promise<void> {
+): Promise<number> {
   const session = sessions.get(callId);
-  if (!session || !text.trim()) return;
+  if (!session || !text.trim()) return 0;
+
+  stopThinkingOnCall(callId);
 
   const audio = await synthesizeHebrewSpeech(text, options);
   if (!audio || tts.isAborted()) {
     logger.warn({ callId, hasAudio: Boolean(audio) }, "speakOnCall skipped — no TTS audio");
-    return;
+    return 0;
   }
+
+  clearPlayback(callId);
 
   session.isSpeaking = true;
   const signal = tts.getSignal();
   logger.info({ callId, bytes: audio.length }, "Streaming TTS to caller");
 
+  let playedBytes = 0;
   try {
     for (let offset = 0; offset < audio.length; offset += MULAW_CHUNK_BYTES) {
       if (signal.aborted || session.twilioWs.readyState !== 1) break;
@@ -230,6 +294,7 @@ export async function speakOnCall(
           media: { payload: chunk.toString("base64") },
         }),
       );
+      playedBytes = offset + chunk.length;
 
       try {
         await sleep(20, signal);
@@ -240,10 +305,17 @@ export async function speakOnCall(
   } finally {
     session.isSpeaking = false;
   }
+
+  if (playedBytes === 0) return 0;
+  return Math.ceil((playedBytes * 1000) / 8000);
 }
 
 export function hasMediaSession(callId: string): boolean {
   return sessions.has(callId);
+}
+
+export function isStreamingTtsOnCall(callId: string): boolean {
+  return sessions.get(callId)?.isSpeaking ?? false;
 }
 
 export async function waitForMediaSession(callId: string, maxMs = 10000): Promise<boolean> {
@@ -253,4 +325,15 @@ export async function waitForMediaSession(callId: string, maxMs = 10000): Promis
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return false;
+}
+
+/** Process customer speech that arrived while AI audio was playing (avoids aborting TTS). */
+export async function flushPendingCustomerSpeech(callId: string): Promise<void> {
+  const session = sessions.get(callId);
+  if (!session?.pendingTranscript?.trim()) return;
+  if (isAiPlaybackActive(callId) || session.isSpeaking) return;
+  const text = session.pendingTranscript;
+  session.pendingTranscript = undefined;
+  logger.info({ callId, text }, "Processing deferred transcript after AI playback");
+  await onCustomerSpeech(callId, text);
 }

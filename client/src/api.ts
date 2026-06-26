@@ -24,7 +24,8 @@ export const callsApi = {
   list: () => api.get<{ items: Call[] }>("/calls").then((r) => r.data),
   active: () => api.get<Call | null>("/calls/active").then((r) => r.data),
   get: (id: string) => api.get<Call>(`/calls/${id}`).then((r) => r.data),
-  start: (contactId: string) => api.post<Call>("/calls/start", { contactId }).then((r) => r.data),
+  start: (contactId: string) =>
+    api.post<Call>("/calls/start", { contactId }, { timeout: 120_000 }).then((r) => r.data),
   startTest: (contactId: string) => api.post<Call>("/calls/test-start", { contactId }).then((r) => r.data),
   hangUp: (id: string) => api.post<{ ok: boolean }>(`/calls/${id}/hangup`).then((r) => r.data),
   testRewind: (id: string) =>

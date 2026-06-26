@@ -10,7 +10,9 @@ import { warnIfWebhookUnreachable } from "./telephony/tunnelManager.js";
 import {
   handleTwilioMediaMessage,
   unregisterMediaStreamForWs,
+  warmDeepgramStt,
 } from "./voice/mediaSession.js";
+import { warmElevenLabsTts } from "./voice/tts.js";
 import { handleBrowserTestConnection } from "./voice/browserTestSession.js";
 
 const port = Number(process.env.PORT ?? 3001);
@@ -73,6 +75,7 @@ server.on("upgrade", (req, socket, head) => {
 
   if (path === "/api/webhooks/twilio/media") {
     mediaWss.handleUpgrade(req, socket, head, (ws) => {
+      logger.info("Twilio media WebSocket connected");
       mediaWss.emit("connection", ws, req);
     });
     return;
@@ -84,6 +87,27 @@ server.on("upgrade", (req, socket, head) => {
 async function main() {
   await runSeed();
   await recoverStuckContacts();
+  void warmElevenLabsTts();
+  void warmDeepgramStt();
+
+  const shutdown = (signal: string) => {
+    logger.info({ signal }, "Shutting down server");
+    wss.clients.forEach((client) => client.close());
+    mediaWss.clients.forEach((client) => client.close());
+    testCallWss.clients.forEach((client) => client.close());
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.once("SIGINT", () => shutdown("SIGINT"));
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      logger.error({ port, err }, "Port already in use — stop the other server and restart");
+      process.exit(1);
+    }
+    throw err;
+  });
   server.listen(port, () => {
     logger.info({ port }, "AICaller server started");
     void warnIfWebhookUnreachable();

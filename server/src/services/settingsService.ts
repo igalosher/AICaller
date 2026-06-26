@@ -27,17 +27,25 @@ export async function getSettings() {
 }
 
 export async function getTelephonyConfig(): Promise<TelephonyConfig> {
+  const fromEnv: TelephonyConfig = {
+    provider: (process.env.TELEPHONY_PROVIDER as "mock" | "twilio") ?? "mock",
+    accountSid: process.env.TWILIO_ACCOUNT_SID,
+    authToken: process.env.TWILIO_AUTH_TOKEN,
+    phoneNumber: process.env.TWILIO_PHONE_NUMBER,
+    webhookBaseUrl: process.env.TWILIO_WEBHOOK_BASE_URL,
+  };
   const settings = await getSettings();
   if (!settings.telephonyConfig) {
-    return {
-      provider: (process.env.TELEPHONY_PROVIDER as "mock" | "twilio") ?? "mock",
-      accountSid: process.env.TWILIO_ACCOUNT_SID,
-      authToken: process.env.TWILIO_AUTH_TOKEN,
-      phoneNumber: process.env.TWILIO_PHONE_NUMBER,
-      webhookBaseUrl: process.env.TWILIO_WEBHOOK_BASE_URL,
-    };
+    return fromEnv;
   }
-  return JSON.parse(decrypt(settings.telephonyConfig)) as TelephonyConfig;
+  const stored = JSON.parse(decrypt(settings.telephonyConfig)) as TelephonyConfig;
+  return {
+    provider: stored.provider ?? fromEnv.provider,
+    accountSid: stored.accountSid || fromEnv.accountSid,
+    authToken: stored.authToken || fromEnv.authToken,
+    phoneNumber: stored.phoneNumber || fromEnv.phoneNumber,
+    webhookBaseUrl: stored.webhookBaseUrl || fromEnv.webhookBaseUrl,
+  };
 }
 
 export async function saveTelephonyConfig(config: TelephonyConfig) {

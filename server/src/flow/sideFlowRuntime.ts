@@ -1,11 +1,43 @@
 import type { GraphFlowEngine } from "./graphFlowEngine.js";
 import type { FlowGraph, SideFlowDef, SpeakNode } from "./graphTypes.js";
 import type { GraphCallContext } from "./graphFlowRuntime.js";
-import { findSideFlow, isMainPathAnswer } from "./graphFlowRuntime.js";
+import { findSideFlow, isMainPathAnswer, isProductQaIntent } from "./graphFlowRuntime.js";
+
+/** Customer signals they are done with the side-topic and wants to resume qualification. */
+export const SIDE_FLOW_EXIT_INTENTS = new Set([
+  "greeting_ack",
+  "small_talk",
+  "not_interested",
+]);
+
+export function isSideFlowExitIntent(intentId: string): boolean {
+  return SIDE_FLOW_EXIT_INTENTS.has(intentId);
+}
 
 export function isInSideFlow(ctx: GraphCallContext, engine: GraphFlowEngine): boolean {
   if (!ctx.mainCheckpoint) return false;
-  return engine.currentNodeId !== ctx.mainCheckpoint.resumeNodeId;
+  if (engine.currentNodeId === ctx.mainCheckpoint.resumeNodeId) return false;
+  const active = findActiveSideFlow(engine.getGraph(), ctx, engine);
+  return Boolean(active);
+}
+
+export function findActiveSideFlow(
+  graph: FlowGraph,
+  ctx: GraphCallContext,
+  engine: GraphFlowEngine,
+): SideFlowDef | undefined {
+  if (!ctx.mainCheckpoint) return undefined;
+  if (ctx.mainCheckpoint.sideFlowId) {
+    return graph.sideFlows?.find((sf) => sf.id === ctx.mainCheckpoint!.sideFlowId);
+  }
+  const currentId = engine.currentNodeId;
+  if (!currentId) return undefined;
+  for (const sf of graph.sideFlows ?? []) {
+    if (collectSideFlowSubgraphNodeIds(graph, sf.entryNodeId).has(currentId)) {
+      return sf;
+    }
+  }
+  return undefined;
 }
 
 export function shouldEnterSideFlow(
@@ -22,6 +54,24 @@ export function shouldEnterSideFlow(
   const entry = graph.nodes.find((n) => n.id === sideFlow.entryNodeId);
   if (!entry || entry.type !== "speak") return undefined;
   return sideFlow;
+}
+
+/** All nodes reachable from side-flow entry until a returnsToMain speak (exclusive). */
+export function collectSideFlowSubgraphNodeIds(graph: FlowGraph, entryNodeId: string): Set<string> {
+  const ids = new Set<string>();
+  const queue = [entryNodeId];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (ids.has(id)) continue;
+    const node = graph.nodes.find((n) => n.id === id);
+    if (!node) continue;
+    ids.add(id);
+    if (node.type === "speak" && node.returnsToMain) continue;
+    for (const edge of graph.edges.filter((e) => e.source === id)) {
+      queue.push(edge.target);
+    }
+  }
+  return ids;
 }
 
 /** Walk a disconnected speak chain until returnsToMain, listen, or branch. */
@@ -47,12 +97,29 @@ export function collectSideFlowSpeakNodes(
   return speaks;
 }
 
+export function findSideFlowFarewellSpeak(
+  graph: FlowGraph,
+  entryNodeId: string,
+): SpeakNode | undefined {
+  const subgraph = collectSideFlowSubgraphNodeIds(graph, entryNodeId);
+  return graph.nodes.find(
+    (n): n is SpeakNode =>
+      subgraph.has(n.id) && n.type === "speak" && Boolean((n as SpeakNode).returnsToMain),
+  );
+}
+
 export function sideFlowNodeIds(graph: FlowGraph): Set<string> {
   const ids = new Set<string>();
   for (const sf of graph.sideFlows ?? []) {
-    for (const speak of collectSideFlowSpeakNodes(graph, sf.entryNodeId)) {
-      ids.add(speak.id);
+    for (const id of collectSideFlowSubgraphNodeIds(graph, sf.entryNodeId)) {
+      ids.add(id);
     }
   }
   return ids;
+}
+
+export function isSideFlowProductConversation(graph: FlowGraph, sideFlow: SideFlowDef): boolean {
+  if (isProductQaIntent(sideFlow.intentId)) return true;
+  const entry = graph.nodes.find((n) => n.id === sideFlow.entryNodeId);
+  return Boolean(entry?.type === "speak" && entry.useLlm);
 }

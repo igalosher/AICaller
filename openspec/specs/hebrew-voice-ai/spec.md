@@ -119,6 +119,43 @@ End-to-end voice round-trip (customer speech end → AI response audio start) SH
 - **WHEN** a customer finishes a short question
 - **THEN** the AI begins speaking its response within 2 seconds in 90% of utterances during testing
 
+### Requirement: Thinking indicator during LLM wait
+While the LLM generates a reply (and before reply TTS is ready), the system SHALL play a **rising-tone hold sound** to the caller: three ascending sine tones at approximately **392 Hz → 494 Hz → 587 Hz**, **200 ms** per tone, **750 ms** apart, looping until playback stops.
+
+#### Scenario: Twilio call thinking tone
+- **WHEN** a real Twilio call is waiting on an LLM reply after customer speech
+- **THEN** the caller hears the rising-tone loop via Twilio `<Play loop="0">` and the tone stops before the reply ElevenLabs clip plays
+
+#### Scenario: Browser test thinking tone
+- **WHEN** a browser test call is waiting on an LLM reply
+- **THEN** the operator hears the same rising-tone pattern locally until reply TTS starts
+
+#### Scenario: No thinking during AI speech
+- **WHEN** the AI is already playing TTS for a speak node or opening clip
+- **THEN** the thinking tone does not play over the AI voice
+
+### Requirement: Twilio ElevenLabs playback
+On real Twilio calls, AI speech SHALL be delivered as **pre-rendered ElevenLabs MP3 clips** served from the application webhook and played via Twilio `<Play>`, not Twilio `<Say>`. Opening audio SHALL be preloaded (or rendered at answer as fallback) before or as the callee answers.
+
+#### Scenario: Opening plays on answer
+- **WHEN** the callee answers an outbound Twilio call and opening audio is ready
+- **THEN** answer TwiML starts the Deepgram media stream and plays the preloaded opening MP3
+
+#### Scenario: Deferred opening when clip still rendering
+- **WHEN** the callee answers before opening MP3 is ready
+- **THEN** the answer webhook responds immediately with hold TwiML (stream + pause) and queues the opening clip via call update when synthesis completes
+
+#### Scenario: Reply after customer speech
+- **WHEN** the runtime speaks a graph reply on a connected Twilio call
+- **THEN** a new MP3 clip is synthesized and pushed to the active call via TwiML update
+
+### Requirement: STT deferral during AI playback
+On Twilio media-stream calls, final Deepgram transcripts received while AI audio is playing SHALL be buffered and processed only after playback ends, so opening and replies are not interrupted by echo or early barge-in.
+
+#### Scenario: Transcript held during opening
+- **WHEN** the customer speaks during the opening `<Play>` clip
+- **THEN** the final transcript is deferred until opening playback completes, then processed as the first customer turn
+
 ### Requirement: Intent-driven flow navigation
 After each classified customer utterance, the voice pipeline SHALL advance the call according to the active engine: **staged** (`currentStageId`, `advanceOn`, opt-out, Q&A interrupt) or **graph** (edges matching intent), then generate the next speak content.
 

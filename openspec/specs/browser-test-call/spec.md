@@ -39,6 +39,13 @@ The browser test WebSocket SHALL accept `{ type: "skip_speak" }` from the client
 - **WHEN** the client sends `skip_speak` during an active test call session
 - **THEN** the server stops browser playback signaling and replies with `speak_skipped` without invoking customer turn processing
 
+### Requirement: Thinking indicator in test call
+During browser test calls, while the server waits for an LLM reply, it SHALL signal `{ type: "thinking_start" }` on the WebSocket and the client SHALL play the **rising-tone** hold sound until `{ type: "thinking_stop" }` or reply TTS begins.
+
+#### Scenario: Thinking while generating reply
+- **WHEN** the operator sends a customer reply and the server invokes the LLM
+- **THEN** the operator hears ascending tones (392 → 494 → 587 Hz) until the AI response audio starts
+
 ### Requirement: Test call survives SPA navigation
 A browser test call session SHALL remain active when the operator navigates to other application sections (e.g. **בניית זרימה**, **אנשי קשר**) until the operator explicitly hangs up or the call ends normally.
 

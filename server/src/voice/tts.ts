@@ -11,6 +11,27 @@ export type TtsOptions = {
 /** ElevenLabs Hebrew sales voice for YES caller */
 export const ELEVENLABS_VOICE_ID = "YYTS9u0exInqiKLFra6w";
 
+const CACHE_TTL_MS = 30 * 60 * 1000;
+const audioCache = new Map<string, { buffer: Buffer; expiresAt: number }>();
+
+export function ttsCacheKey(text: string, outputFormat: string, options?: TtsOptions): string {
+  const ttsText = adaptHebrewTextForTts(text, options?.addresseeSex ?? "male");
+  return `${outputFormat}|${ttsText}`;
+}
+
+function getCachedAudio(key: string): Buffer | null {
+  const hit = audioCache.get(key);
+  if (!hit || hit.expiresAt < Date.now()) {
+    audioCache.delete(key);
+    return null;
+  }
+  return hit.buffer;
+}
+
+function putCachedAudio(key: string, buffer: Buffer): void {
+  audioCache.set(key, { buffer, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
 function elevenLabsModelId(): string {
   return process.env.ELEVENLABS_MODEL_ID ?? "eleven_v3";
 }
@@ -27,6 +48,15 @@ async function synthesizeSpeech(
   }
 
   const ttsText = adaptHebrewTextForTts(text, options?.addresseeSex ?? "male");
+  const cacheKey = ttsCacheKey(text, outputFormat, options);
+  const cached = getCachedAudio(cacheKey);
+  if (cached) {
+    logger.info(
+      { bytes: cached.length, voiceId: ELEVENLABS_VOICE_ID, outputFormat, cache: "hit" },
+      "ElevenLabs TTS cache hit",
+    );
+    return cached;
+  }
 
   const voiceId = ELEVENLABS_VOICE_ID;
   const modelId = elevenLabsModelId();
@@ -55,7 +85,8 @@ async function synthesizeSpeech(
     return null;
   }
   const audio = Buffer.from(await res.arrayBuffer());
-  logger.info({ bytes: audio.length, voiceId, modelId, outputFormat }, "ElevenLabs TTS synthesized");
+  putCachedAudio(cacheKey, audio);
+  logger.info({ bytes: audio.length, voiceId, modelId, outputFormat, cache: "miss" }, "ElevenLabs TTS synthesized");
   return audio;
 }
 
@@ -88,5 +119,13 @@ export class TtsSession {
 
   getSignal(): AbortSignal {
     return this.abortController.signal;
+  }
+}
+
+/** Pre-warm ElevenLabs TTS so the first real call does not pay cold-start latency. */
+export async function warmElevenLabsTts(): Promise<void> {
+  const buf = await synthesizeHebrewSpeech(".");
+  if (buf?.length) {
+    logger.info({ bytes: buf.length }, "ElevenLabs TTS warm-up complete");
   }
 }

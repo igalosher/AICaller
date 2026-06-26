@@ -2,13 +2,13 @@
  * Graph-runtime integration tests for Sigal MiniFlow (tasks 7.4, 10.3).
  * Run: npm run test:sigal-graph-flow -w server
  */
-import { createSigalMiniFlowGraph } from "../src/flow/sigalMiniFlow.js";
+import { createSigalMiniFlowGraph, enhanceSigalGraph } from "../src/flow/sigalMiniFlow.js";
 import { createEngineFromGraph, type GraphFlowEngine } from "../src/flow/graphFlowEngine.js";
 import { isOrphanAnnouncementRoute, advanceOrphanAnnouncementRoute } from "../src/flow/graphFlowRuntime.js";
 import { lookupFiberAvailability } from "../src/services/fiberLookup.js";
 import type { ClassificationResult } from "../src/flow/graphTypes.js";
 
-type Ctx = { lastSpokenText?: string };
+type Ctx = { lastSpokenText?: string; variables?: Record<string, unknown> };
 
 function cls(intentId: string, entities: Record<string, unknown> = {}): ClassificationResult {
   return { intentId, confidence: 1, entities, classifier: "rule" };
@@ -45,10 +45,18 @@ function routeTurn(
   }
 
   let routed = classification;
-  if (classification.intentId === "provide_address") {
+  if (atStart === "listen_address" && classification.intentId === "provide_address") {
+    ctx.variables = {
+      ...ctx.variables,
+      CustomerAddress: text || String(classification.entities.address ?? ""),
+    };
+  }
+  if (atStart === "listen_address_confirm" && text.trim()) {
+    ctx.variables = { ...ctx.variables, AddressConfirmAnswerText: text.trim() };
+  }
+  if (classification.intentId === "provide_address" && atStart !== "listen_address") {
     const address = (classification.entities.address as string | undefined) ?? text;
     const available = lookupFiberAvailability(address);
-    void available;
     routed = cls(available ? "fiber_available" : "fiber_unavailable");
   }
 
@@ -56,6 +64,17 @@ function routeTurn(
   let node = engine.getCurrentNode();
   if (node?.type === "intent_route" || node?.type === "decision") {
     node = engine.advanceByClassification(routed, {}) ?? undefined;
+  }
+  if (node?.type === "decision") {
+    node = engine.advanceByDecision((ctx as { variables?: Record<string, unknown> }).variables ?? {}) ?? undefined;
+  }
+  if (node?.type === "intent_route" && node.id === "route_fiber") {
+    const address = String((ctx as { variables?: Record<string, unknown> }).variables?.CustomerAddress ?? text).trim();
+    if (address) {
+      const available = lookupFiberAvailability(address);
+      routed = cls(available ? "fiber_available" : "fiber_unavailable");
+      node = engine.advanceByClassification(routed, {}) ?? undefined;
+    }
   }
 
   let spokeId: string | undefined;
@@ -155,7 +174,7 @@ function testManualScenario74(engine: GraphFlowEngine) {
 
 // --- Task 10.3: full MiniFlow paths ---
 function testFullMiniFlowRegular(engine: GraphFlowEngine) {
-  const ctx: Ctx = {};
+  const ctx: Ctx = { variables: {} };
   engine.currentNodeId = "listen_address";
   let r = routeTurn(
     engine,
@@ -163,7 +182,16 @@ function testFullMiniFlowRegular(engine: GraphFlowEngine) {
     ctx,
     "רחוב הסיב 5 תל אביב",
   );
-  assert(r.spokeId === "speak_fiber_yes", "fiber address → yes announcement");
+  assert(r.spokeId === "speak_address_confirm", "address → confirm prompt");
+  assert(
+    speakText(engine, "speak_address_confirm").includes("CustomerAddress"),
+    "confirm speaks address variable back",
+  );
+  assert(r.listenId === "listen_address_confirm", "waits for address confirmation");
+  ctx.variables = { ...ctx.variables, CustomerAddress: "רחוב הסיב 5 תל אביב" };
+  engine.currentNodeId = "listen_address_confirm";
+  r = routeTurn(engine, cls("greeting_ack"), ctx, "כן");
+  assert(r.spokeId === "speak_fiber_yes", "confirmed address → fiber yes announcement");
   assert(r.listenId === "listen_speed_fiber", "fiber yes auto-chains to speed question");
   r = routeTurn(engine, cls("select_speed_600"), ctx);
   assert(r.spokeId === "speak_provider", "speed → provider");
@@ -182,7 +210,16 @@ function testFullMiniFlowRegular(engine: GraphFlowEngine) {
   assert(r.listenId === "listen_callback", "summary auto-chains to callback question");
   r = routeTurn(engine, cls("agree_callback"), ctx);
   assert(r.endNodeId === "end_callback", "callback agree → end_callback");
-  log("full path: regular → fiber yes → sales → callback lead");
+  log("full path: regular → address confirm → fiber yes → sales → callback lead");
+}
+
+function testAddressConfirmNo(engine: GraphFlowEngine) {
+  const ctx: Ctx = { variables: { CustomerAddress: "רחוב דיזנגוף 1 תל אביב" } };
+  engine.currentNodeId = "listen_address_confirm";
+  const r = routeTurn(engine, cls("decline_callback"), ctx, "לא");
+  assert(r.spokeId === "speak_address", "address not confirmed → re-ask address");
+  assert(r.listenId === "listen_address", "lands on address listen");
+  log("address confirm no → re-ask address");
 }
 
 function testFiberExistsPath(engine: GraphFlowEngine) {
@@ -211,11 +248,12 @@ function testOptOut(engine: GraphFlowEngine) {
   log("opt-out route wired on address step");
 }
 
-const graph = createSigalMiniFlowGraph();
+const graph = enhanceSigalGraph(createSigalMiniFlowGraph());
 const engine = createEngineFromGraph(JSON.stringify(graph));
 
 testManualScenario74(createEngineFromGraph(JSON.stringify(graph)));
 testFullMiniFlowRegular(createEngineFromGraph(JSON.stringify(graph)));
+testAddressConfirmNo(createEngineFromGraph(JSON.stringify(graph)));
 testFiberExistsPath(createEngineFromGraph(JSON.stringify(graph)));
 testNoInternetPath(createEngineFromGraph(JSON.stringify(graph)));
 testOptOut(engine);

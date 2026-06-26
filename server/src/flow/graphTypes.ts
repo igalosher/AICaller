@@ -101,6 +101,8 @@ export interface MainFlowCheckpoint {
   listenNodeId: string;
   resumeNodeId: string;
   lastSpokenText: string;
+  /** Active side flow while in a multi-turn side conversation. */
+  sideFlowId?: string;
 }
 
 export interface FlowGraph {

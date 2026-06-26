@@ -1,13 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { logger } from "../logger.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { getTelephonyConfig, saveTelephonyConfig } from "../services/settingsService.js";
 
 const TUNNEL_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
-const PROBE_PATH = "/api/webhooks/twilio/voice?callId=healthcheck";
-const TUNNEL_START_TIMEOUT_MS = 90_000;
+const PROBE_PATH = "/health";
+const TUNNEL_START_TIMEOUT_MS = 120_000;
 
 let tunnelProcess: ChildProcess | null = null;
 let currentPublicUrl: string | null = null;
@@ -38,12 +38,22 @@ export async function probeWebhookBaseUrl(baseUrl: string): Promise<boolean> {
   if (!baseUrl || baseUrl.includes("localhost") || baseUrl.includes("127.0.0.1")) {
     return false;
   }
+  const root = baseUrl.replace(/\/$/, "");
   try {
-    const res = await fetch(`${baseUrl.replace(/\/$/, "")}${PROBE_PATH}`, {
+    const health = await fetch(`${root}${PROBE_PATH}`, {
+      method: "GET",
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!health.ok) return false;
+  } catch {
+    return false;
+  }
+  try {
+    const voice = await fetch(`${root}/api/webhooks/twilio/voice?callId=healthcheck`, {
       method: "POST",
       signal: AbortSignal.timeout(8_000),
     });
-    return res.ok;
+    return voice.ok;
   } catch {
     return false;
   }
@@ -56,10 +66,29 @@ function shouldAutoStartTunnel(url: string | undefined): boolean {
   return false;
 }
 
+function isDevTwilioTunnelMode(): boolean {
+  return process.env.DEV_TWILIO_TUNNEL === "1";
+}
+
+async function probeLocalServer(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(3_000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function syncWebhookToDb(url: string): Promise<void> {
   const config = await getTelephonyConfig();
   if (config.webhookBaseUrl === url) return;
-  await saveTelephonyConfig({ ...config, webhookBaseUrl: url });
+  await saveTelephonyConfig({
+    ...config,
+    provider: config.provider ?? "twilio",
+    webhookBaseUrl: url,
+  });
   logger.info({ url }, "Synced Twilio webhook URL to settings");
 }
 
@@ -73,6 +102,33 @@ function stopTunnelProcess(): void {
   tunnelProcess = null;
 }
 
+const CLOUDFLARED_CANDIDATES = [
+  "cloudflared",
+  "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe",
+  "C:\\Program Files\\cloudflared\\cloudflared.exe",
+];
+
+function resolveCloudflaredCommand(): { command: string; args: string[] } {
+  const tunnelArgs = ["tunnel", "--protocol", "http2", "--url"];
+  for (const candidate of CLOUDFLARED_CANDIDATES) {
+    if (candidate === "cloudflared") continue;
+    if (existsSync(candidate)) return { command: candidate, args: tunnelArgs };
+  }
+  return {
+    command: "npx",
+    args: ["--yes", "cloudflared", "tunnel", "--protocol", "http2", "--url"],
+  };
+}
+
+function spawnCloudflared(localPort: number): ChildProcess {
+  const { command, args } = resolveCloudflaredCommand();
+  const localUrl = `http://127.0.0.1:${localPort}`;
+  return spawn(command, [...args, localUrl], {
+    shell: command === "npx",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
 function startCloudflaredTunnel(localPort: number): Promise<string> {
   if (startingPromise) return startingPromise;
 
@@ -83,11 +139,7 @@ function startCloudflaredTunnel(localPort: number): Promise<string> {
     const port = localPort;
     logger.info({ port }, "Starting cloudflared tunnel for Twilio webhooks");
 
-    const child = spawn(
-      "npx",
-      ["--yes", "cloudflared", "tunnel", "--protocol", "http2", "--url", `http://127.0.0.1:${port}`],
-      { shell: true, stdio: ["ignore", "pipe", "pipe"] },
-    );
+    const child = spawnCloudflared(port);
     tunnelProcess = child;
 
     let settled = false;
@@ -175,7 +227,16 @@ export async function ensureTwilioWebhookReady(): Promise<void> {
   if (config.provider !== "twilio") return;
 
   const port = Number(process.env.PORT ?? 3001);
-  let url = config.webhookBaseUrl ?? process.env.TWILIO_WEBHOOK_BASE_URL ?? "";
+  const envUrl = process.env.TWILIO_WEBHOOK_BASE_URL?.replace(/\/$/, "") ?? "";
+  let url = config.webhookBaseUrl ?? envUrl ?? "";
+
+  if (envUrl && (await probeWebhookBaseUrl(envUrl))) {
+    if (config.webhookBaseUrl !== envUrl) {
+      await syncWebhookToDb(envUrl);
+    }
+    currentPublicUrl = envUrl;
+    return;
+  }
 
   if (currentPublicUrl && (await probeWebhookBaseUrl(currentPublicUrl))) {
     if (url !== currentPublicUrl) {
@@ -198,6 +259,13 @@ export async function ensureTwilioWebhookReady(): Promise<void> {
     );
   }
 
+  if (isDevTwilioTunnelMode() && (await probeLocalServer(port))) {
+    throw new AppError(
+      503,
+      "המנהרה ל-Twilio לא פעילה. הפעל מחדש את npm run dev:twilio (השאר את הטרמינל פתוח).",
+    );
+  }
+
   try {
     url = await startCloudflaredTunnel(port);
     if (!(await probeWebhookBaseUrl(url))) {
@@ -205,6 +273,12 @@ export async function ensureTwilioWebhookReady(): Promise<void> {
     }
   } catch (err) {
     logger.error({ err }, "Failed to start Twilio webhook tunnel");
+    if (await probeLocalServer(port)) {
+      throw new AppError(
+        503,
+        "המנהרה ל-Twilio לא פעילה. הפעל מחדש את npm run dev:twilio (השאר את הטרמינל פתוח).",
+      );
+    }
     throw new AppError(
       503,
       "לא ניתן להפעיל מנהרה ל-Twilio. ודא שהשרת רץ וש-cloudflared זמין (npm install -g cloudflared או npx).",
@@ -223,6 +297,14 @@ export async function warnIfWebhookUnreachable(): Promise<void> {
   }
 
   if (await probeWebhookBaseUrl(url)) return;
+
+  if (isDevTwilioTunnelMode()) {
+    logger.warn(
+      { url },
+      "Twilio webhook tunnel is down — restart npm run dev:twilio to get a fresh cloudflared URL",
+    );
+    return;
+  }
 
   if (shouldAutoStartTunnel(url)) {
     logger.warn(

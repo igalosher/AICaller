@@ -582,6 +582,14 @@ export function FlowBuilderPage() {
     );
   };
 
+  const updateSelectedUseLlm = (useLlm: boolean) => {
+    if (!selectedId) return;
+    clearAiUndoStack();
+    setRawNodes((prev: FlowNode[]) =>
+      prev.map((n) => (n.id === selectedId && n.type === "speak" ? { ...n, useLlm } : n)),
+    );
+  };
+
   const addSideFlow = () => {
     clearAiUndoStack();
     const id = `sf_${Date.now()}`;
@@ -1203,6 +1211,19 @@ export function FlowBuilderPage() {
                   ))}
                 </div>
               )}
+              <label className="mt-2 flex items-center gap-2 rounded border p-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={Boolean((selectedNode as { useLlm?: boolean }).useLlm)}
+                  onChange={(e) => updateSelectedUseLlm(e.target.checked)}
+                />
+                <span>
+                  <span className="font-medium">תשובת AI (LLM)</span>
+                  <span className="block text-xs text-slate-600">
+                    צומת דיבור זה ישתמש ב-AI עם קטלוג המוצרים — מתאים לזרימות צד ושאלות מוצר
+                  </span>
+                </span>
+              </label>
               <label className="mt-2 flex items-center gap-2 rounded border p-2 text-sm">
                 <input
                   type="checkbox"

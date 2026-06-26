@@ -38,6 +38,7 @@ interface BrowserTestSession {
   lastFinalAt: number;
   /** True after `play` sent until skip, stop, or customer speech interrupt. */
   speaking: boolean;
+  thinking: boolean;
   /** Finalize call + hangup after current clip finishes playing. */
   pendingCallEnd?: CallOutcome;
 }
@@ -102,6 +103,7 @@ export async function handleBrowserTestConnection(ws: WebSocket, callId: string)
     lastFinalTranscript: "",
     lastFinalAt: 0,
     speaking: false,
+    thinking: false,
   });
   sessionReady = true;
 
@@ -143,6 +145,7 @@ async function handleBrowserTestMessage(callId: string, message: BrowserClientMe
   if (message.type === "skip_speak") {
     if (!session.speaking) return;
     session.speaking = false;
+    session.thinking = false;
     session.ws.send(JSON.stringify({ type: "stop_playback" }));
     session.ws.send(JSON.stringify({ type: "speak_skipped" }));
     await completePendingCallEnd(callId);
@@ -183,19 +186,35 @@ export async function completePendingCallEnd(callId: string): Promise<void> {
   }
 }
 
+export function startThinkingToBrowser(callId: string): void {
+  const session = sessions.get(callId);
+  if (!session || session.ws.readyState !== 1 || session.thinking) return;
+  session.thinking = true;
+  session.ws.send(JSON.stringify({ type: "thinking_start" }));
+}
+
+export function stopThinkingToBrowser(callId: string): void {
+  const session = sessions.get(callId);
+  if (!session || session.ws.readyState !== 1 || !session.thinking) return;
+  session.thinking = false;
+  session.ws.send(JSON.stringify({ type: "thinking_stop" }));
+}
+
+export type BrowserSpeakResult = { played: boolean; durationMs: number };
+
 export async function speakToBrowser(
   callId: string,
   text: string,
   endCall: boolean,
   options?: TtsOptions,
-): Promise<boolean> {
+): Promise<BrowserSpeakResult> {
   const session = sessions.get(callId);
-  if (!session || session.ws.readyState !== 1) return false;
+  if (!session || session.ws.readyState !== 1) return { played: false, durationMs: 0 };
   if (!text.trim()) {
     if (endCall && session.pendingCallEnd) {
       await completePendingCallEnd(callId);
     }
-    return false;
+    return { played: false, durationMs: 0 };
   }
 
   const audio = await synthesizeHebrewSpeechMp3(text, options);
@@ -204,9 +223,12 @@ export async function speakToBrowser(
     if (endCall && session.pendingCallEnd) {
       await completePendingCallEnd(callId);
     }
-    return false;
+    return { played: false, durationMs: 0 };
   }
 
+  stopThinkingToBrowser(callId);
+
+  const durationMs = Math.ceil((audio.length * 8 * 1000) / 128_000);
   session.speaking = true;
   session.ws.send(
     JSON.stringify({
@@ -216,14 +238,16 @@ export async function speakToBrowser(
     }),
   );
 
-  return true;
+  return { played: true, durationMs };
 }
 
 export function stopBrowserPlayback(callId: string): void {
   const session = sessions.get(callId);
   if (!session || session.ws.readyState !== 1) return;
   session.speaking = false;
+  session.thinking = false;
   session.ws.send(JSON.stringify({ type: "stop_playback" }));
+  session.ws.send(JSON.stringify({ type: "thinking_stop" }));
 }
 
 export function hasBrowserSession(callId: string): boolean {

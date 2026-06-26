@@ -163,6 +163,11 @@ export function CallsPage() {
         qc.invalidateQueries({ queryKey: ["activeCall"] });
       }
       if (e.type === "call_status") {
+        if (e.status === "busy") {
+          setCallError(
+            "הקו תפוס או שהשיחה נדחתה. ודא שהטלפון פנוי, ענה מהר כשמצלצל, ואל תחסום שיחות מחו״ל.",
+          );
+        }
         qc.invalidateQueries({ queryKey: ["calls"] });
         qc.invalidateQueries({ queryKey: ["activeCall"] });
       }
@@ -216,16 +221,19 @@ export function CallsPage() {
               {activeCall ? "שיחה פעילה" : "פרטי שיחה"} —{" "}
               {displayCall.contact ? contactDisplayName(displayCall.contact) : "—"}
             </h3>
-            {isActiveCallLive && (
-              <button
-                type="button"
-                className="rounded-lg bg-red-600 px-4 py-2 text-sm text-white disabled:opacity-60"
-                disabled={hangUpMutation.isPending}
-                onClick={() => hangUpMutation.mutate(activeCall!.id)}
-              >
-                {hangUpMutation.isPending ? "מנתק..." : "נתק שיחה"}
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              <StatusBadge status={displayCall.status} />
+              {isActiveCallLive && (
+                <button
+                  type="button"
+                  className="rounded-lg bg-red-600 px-4 py-2 text-sm text-white disabled:opacity-60"
+                  disabled={hangUpMutation.isPending}
+                  onClick={() => hangUpMutation.mutate(activeCall!.id)}
+                >
+                  {hangUpMutation.isPending ? "מנתק..." : "נתק שיחה"}
+                </button>
+              )}
+            </div>
           </div>
           {activeCall?.externalCallId?.startsWith("test-") && (
             <div className="mb-3">

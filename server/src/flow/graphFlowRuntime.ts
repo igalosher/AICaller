@@ -20,6 +20,8 @@ export type GraphCallContext = {
   lastSpokenText?: string;
   variables?: Record<string, unknown>;
   mainCheckpoint?: import("./graphTypes.js").MainFlowCheckpoint;
+  /** Consecutive no-response (silence) repeats at listen checkpoints; hang up after max. */
+  silenceRetries?: number;
   /** Test-call only: stack of graph positions after each AI line (for step rewind). */
   testRewindStack?: TestRewindSnapshot[];
 };
@@ -51,6 +53,7 @@ export function parseGraphContext(json: string): GraphCallContext {
       lastSpokenText: parsed.lastSpokenText,
       variables: parsed.variables ?? {},
       mainCheckpoint: parsed.mainCheckpoint,
+      silenceRetries: parsed.silenceRetries,
       testRewindStack: parsed.testRewindStack,
     };
   } catch {

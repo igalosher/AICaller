@@ -31,3 +31,14 @@ Publish validation SHALL require each side flow entry to be a speak node, contai
 #### Scenario: Reject side flow without return
 - **WHEN** an operator publishes a side flow whose last speak node lacks `returnsToMain` and does not connect to a listen node
 - **THEN** publish is blocked with a Hebrew error naming the side flow
+
+### Requirement: Product Q&A side flows
+The Sigal mini-flow enhancer SHALL seed side flows for product intents (`ask_packet`, `ask_channel`, `ask_internet`, `ask_router_rental`, `compare_options`) with an LLM-backed speak node (`useLlm: true`) that answers from catalog context and returns to the main listen checkpoint.
+
+#### Scenario: Packet question during TV count listen
+- **WHEN** the customer asks about a packet at `listen_tv` and `ask_packet` side flow is configured
+- **THEN** the runtime speaks a catalog-backed LLM answer and repeats the TV-count question without advancing the main graph
+
+#### Scenario: Side flow exit intent
+- **WHEN** the customer gives a scoped qualification answer while a product side flow is active
+- **THEN** the runtime exits the side flow and processes the utterance on the main listen checkpoint

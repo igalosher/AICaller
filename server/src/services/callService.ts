@@ -1,4 +1,4 @@
-import type { ContactSex } from "@prisma/client";
+import type { CallOutcome, CallStatus, ContactSex } from "@prisma/client";
 import { prisma } from "../db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import {
@@ -19,9 +19,20 @@ import { toE164 } from "../utils/phone.js";
 import { contactFullName } from "../utils/name.js";
 import { broadcastCallEvent } from "../websocket/callEvents.js";
 import { generateSalesReply, detectOutcome } from "../voice/llm.js";
-import { TtsSession } from "../voice/tts.js";
+import { TtsSession, synthesizeHebrewSpeech } from "../voice/tts.js";
 import { detectVoiceActivity } from "../voice/stt.js";
-import { clearPlayback, registerMediaStreamCallbacks, registerVoiceHandlers, speakOnCall, unregisterMediaStream, waitForMediaSession } from "../voice/mediaSession.js";
+import {
+  clearPlayback,
+  hasMediaSession,
+  isStreamingTtsOnCall,
+  flushPendingCustomerSpeech,
+  registerMediaStreamCallbacks,
+  registerVoiceHandlers,
+  speakOnCall,
+  startThinkingOnCall,
+  stopThinkingOnCall,
+  unregisterMediaStream,
+} from "../voice/mediaSession.js";
 import {
   disconnectBrowserTestCall,
   completePendingCallEnd,
@@ -29,12 +40,13 @@ import {
   registerBrowserTestHandlers,
   setBrowserPendingCallEnd,
   speakToBrowser,
+  startThinkingToBrowser,
   stopBrowserPlayback,
+  stopThinkingToBrowser,
   unregisterBrowserSession,
 } from "../voice/browserTestSession.js";
-import { hangupTwilioCall } from "../voice/twilioPlay.js";
+import { hangupTwilioCall, interruptTwilioPlay, playOnTwilioCall, playThinkingOnTwilioCall } from "../voice/twilioPlay.js";
 import { createPlayClip } from "../voice/playAudio.js";
-import { playOnTwilioCall, playPreloadedOnTwilioCall } from "../voice/twilioPlay.js";
 import { toTelephonyError } from "../telephony/errors.js";
 import { ensureTwilioWebhookReady } from "../telephony/tunnelManager.js";
 import { logger } from "../logger.js";
@@ -54,9 +66,15 @@ import {
 } from "../flow/graphFlowRuntime.js";
 import {
   collectSideFlowSpeakNodes,
+  collectSideFlowSubgraphNodeIds,
+  findActiveSideFlow,
+  findSideFlowFarewellSpeak,
   isInSideFlow,
+  isSideFlowExitIntent,
+  isSideFlowProductConversation,
   shouldEnterSideFlow,
 } from "../flow/sideFlowRuntime.js";
+import { isProductQaIntent } from "../flow/graphFlowRuntime.js";
 import { applyListenBindings, flowVariablesForTemplate } from "../flow/variableBinding.js";
 import { mergeTemplateVars, resolveTemplate } from "../utils/template.js";
 import { lookupFiberAvailability } from "./fiberLookup.js";
@@ -84,7 +102,8 @@ import {
 import { describeChannel } from "./catalogChannelLookup.js";
 import { productTools } from "./productKnowledge.js";
 import { SOLD_GOODBYE } from "../flow/starterFlow.js";
-import type { SpeakNode } from "../flow/graphTypes.js";
+import { POLITE_GOODBYE } from "../flow/sigalMiniFlow.js";
+import type { SpeakNode, SideFlowDef } from "../flow/graphTypes.js";
 import type { StagedFlowDefinition, StagedStage } from "../flow/stagedFlowTypes.js";
 import type { CallOutcome, CallStatus, CallFlow, Contact } from "@prisma/client";
 
@@ -97,15 +116,234 @@ type SessionEngine =
 
 const activeSessions = new Map<string, { tts?: TtsSession; session: SessionEngine }>();
 const voiceSessionsStarted = new Set<string>();
+const voiceKickoffStarted = new Set<string>();
+
+async function markCallRingingIfActive(
+  callId: string,
+  externalCallId: string,
+): Promise<void> {
+  const updated = await prisma.call.updateMany({
+    where: { id: callId, status: "dialing" },
+    data: { externalCallId, status: "ringing" },
+  });
+  if (updated.count === 0) {
+    const current = await prisma.call.findUnique({
+      where: { id: callId },
+      select: { status: true },
+    });
+    logger.info(
+      { callId, status: current?.status },
+      "Skipping ringing update — call already moved past dialing",
+    );
+    return;
+  }
+  broadcastCallEvent({ type: "call_status", callId, status: "ringing" });
+}
 const stagedSilenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const graphSilenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const preloadedOpeningClips = new Map<string, { clipId: string; sayText: string }>();
+const preloadedOpeningClips = new Map<string, { clipId: string; sayText: string; durationMs: number }>();
+const speechTurnChains = new Map<string, Promise<void>>();
+/** Do not interrupt Twilio <Play> or overlap silence timers while AI audio is still playing. */
+const aiPlaybackUntil = new Map<string, number>();
+type AiPlaybackKind = "twiml" | "stream";
+const aiPlaybackKind = new Map<string, AiPlaybackKind>();
 
 /** Seconds of customer silence at a graph listen checkpoint before repeating the last question. */
 export const GRAPH_LISTEN_SILENCE_SEC = 20;
+/** After this many consecutive silences at a listen, say goodbye and end the call. */
+export const GRAPH_SILENCE_MAX_RETRIES = 5;
+/** Buffer after estimated playback so Twilio finishes the clip before we listen. */
+const PLAYBACK_END_BUFFER_MS = 1500;
 
-export function peekPreloadedOpening(callId: string): { clipId: string; sayText: string } | undefined {
+/** Called from answer webhook as soon as opening audio is queued in TwiML. */
+export function markOpeningPlaybackStarted(callId: string, durationMs: number): void {
+  markAiPlayback(callId, durationMs, "twiml");
+}
+
+function markAiPlayback(callId: string, playbackMs: number, kind: AiPlaybackKind = "stream"): void {
+  if (playbackMs <= 0) return;
+  const until = Date.now() + playbackMs + PLAYBACK_END_BUFFER_MS;
+  const prev = aiPlaybackUntil.get(callId) ?? 0;
+  aiPlaybackUntil.set(callId, Math.max(prev, until));
+  aiPlaybackKind.set(callId, kind);
+}
+
+function clearAiPlayback(callId: string): void {
+  aiPlaybackUntil.delete(callId);
+  aiPlaybackKind.delete(callId);
+}
+
+function aiPlaybackRemainingMs(callId: string): number {
+  const until = aiPlaybackUntil.get(callId);
+  if (!until) return 0;
+  return Math.max(0, until - Date.now());
+}
+
+export function isAiSpeaking(callId: string): boolean {
+  return aiPlaybackRemainingMs(callId) > 0;
+}
+
+function onAiPlaybackEnded(callId: string): void {
+  clearAiPlayback(callId);
+  maybeScheduleGraphSilenceForCall(callId);
+  void flushPendingCustomerSpeech(callId);
+}
+
+function startThinkingFeedback(callId: string, twilioCall = false): void {
+  if (twilioCall) {
+    void playThinkingOnTwilioCall(callId);
+  } else {
+    startThinkingOnCall(callId);
+  }
+  startThinkingToBrowser(callId);
+}
+
+function stopThinkingFeedback(callId: string, twilioCall = false): void {
+  if (twilioCall) {
+    void interruptTwilioPlay(callId);
+  } else {
+    stopThinkingOnCall(callId);
+  }
+  stopThinkingToBrowser(callId);
+}
+
+export async function interruptAiPlayback(callId: string): Promise<void> {
+  const kind = aiPlaybackKind.get(callId);
+  const call = await prisma.call.findUnique({
+    where: { id: callId },
+    select: { externalCallId: true },
+  });
+  const isTwilio =
+    call?.externalCallId &&
+    !call.externalCallId.startsWith("mock-") &&
+    !isTestCall(call.externalCallId);
+  const session = activeSessions.get(callId);
+  session?.tts?.abort();
+  clearPlayback(callId);
+  stopBrowserPlayback(callId);
+  stopThinkingFeedback(callId, Boolean(isTwilio));
+  clearGraphSilence(callId);
+  clearAiPlayback(callId);
+  if (kind === "twiml") {
+    await interruptTwilioPlay(callId);
+  }
+}
+
+function deferGraphSilenceUntilAiDone(callId: string): void {
+  const session = activeSessions.get(callId);
+  if (session?.session.mode !== "graph") {
+    clearGraphSilence(callId);
+    return;
+  }
+  if (!getListenCheckpoint(session.session.engine)) {
+    clearGraphSilence(callId);
+    return;
+  }
+
+  clearGraphSilence(callId);
+  const remaining = aiPlaybackRemainingMs(callId);
+  if (remaining > 0) {
+    const timer = setTimeout(() => {
+      graphSilenceTimers.delete(callId);
+      onAiPlaybackEnded(callId);
+    }, remaining);
+    graphSilenceTimers.set(callId, timer);
+    return;
+  }
+  onAiPlaybackEnded(callId);
+}
+
+export function peekPreloadedOpening(callId: string): { clipId: string; sayText: string; durationMs: number } | undefined {
   return preloadedOpeningClips.get(callId);
+}
+
+type OpeningClip = { clipId: string; sayText: string; durationMs: number };
+
+async function resolveOpeningSayText(
+  contact: Contact,
+  flow: CallFlow,
+  graph: ReturnType<typeof getPublishedGraphForCall>,
+  startNodeId: string,
+  initialContext: string,
+): Promise<string> {
+  if (graph) {
+    const engine = createEngineFromGraph(JSON.stringify(graph), startNodeId);
+    const graphContext = parseGraphContext(initialContext);
+    const node = engine.getCurrentNode();
+    if (node?.type === "speak") {
+      return speakFromNode(
+        node,
+        contact,
+        undefined,
+        undefined,
+        undefined,
+        graphContext.variables,
+      );
+    }
+    return "שלום.";
+  }
+  const parsed = parseCallFlow(flow);
+  return previewOpeningLine(
+    parsed.openingTemplate,
+    contactFullName(contact.firstName, contact.familyName),
+  );
+}
+
+async function synthesizeOpeningClip(
+  callId: string,
+  contact: Contact,
+  sayText: string,
+): Promise<OpeningClip> {
+  const ttsOpts = { addresseeSex: contact.sex };
+  const clip = await createPlayClip(sayText, ttsOpts);
+  if (!clip) {
+    throw new AppError(503, "לא ניתן לסנתז את פתיחת השיחה — נסה שוב בעוד רגע");
+  }
+  const result = { clipId: clip.id, sayText, durationMs: clip.durationMs };
+  preloadedOpeningClips.set(callId, result);
+  logger.info({ callId, durationMs: clip.durationMs, clipId: clip.id }, "Opening audio rendered");
+  return result;
+}
+
+async function preloadOpeningAudio(
+  callId: string,
+  contact: Contact,
+  flow: CallFlow,
+  graph: ReturnType<typeof getPublishedGraphForCall>,
+  startNodeId: string,
+  initialContext: string,
+): Promise<OpeningClip> {
+  const sayText = await resolveOpeningSayText(contact, flow, graph, startNodeId, initialContext);
+  return synthesizeOpeningClip(callId, contact, sayText);
+}
+
+/** Answer webhook fallback when in-memory clip was lost (e.g. server restart while ringing). */
+export async function ensureOpeningClipForAnswer(callId: string): Promise<OpeningClip | null> {
+  const cached = preloadedOpeningClips.get(callId);
+  if (cached) return cached;
+
+  const call = await prisma.call.findUnique({
+    where: { id: callId },
+    include: { contact: true, callFlow: true },
+  });
+  if (!call?.contact || !call.callFlow) return null;
+
+  try {
+    const graph = getPublishedGraphForCall(call.callFlow);
+    const startNodeId = call.currentNodeId ?? graph?.startNodeId ?? "speak_opening";
+    const sayText = await resolveOpeningSayText(
+      call.contact,
+      call.callFlow,
+      graph,
+      startNodeId,
+      call.contextJson ?? "{}",
+    );
+    logger.warn({ callId }, "Opening clip missing at answer — rendering before TwiML");
+    return synthesizeOpeningClip(callId, call.contact, sayText);
+  } catch (err) {
+    logger.error({ err, callId }, "Failed to render opening audio at answer");
+    return null;
+  }
 }
 
 export function isTestCall(externalCallId: string | null | undefined): boolean {
@@ -166,8 +404,31 @@ export function scheduleGraphSilence(callId: string): void {
   graphSilenceTimers.set(callId, timer);
 }
 
+function reconcileStaleAiPlayback(callId: string): void {
+  if (!isAiSpeaking(callId)) return;
+  if (isStreamingTtsOnCall(callId)) return;
+  const kind = aiPlaybackKind.get(callId);
+  if (kind === "stream") {
+    logger.warn({ callId, remainingMs: aiPlaybackRemainingMs(callId) }, "Clearing stale stream playback estimate");
+    clearAiPlayback(callId);
+  }
+}
+
+function shouldDeferForAiPlayback(callId: string): boolean {
+  if (!isAiSpeaking(callId)) return false;
+  reconcileStaleAiPlayback(callId);
+  if (!isAiSpeaking(callId)) return false;
+  if (isStreamingTtsOnCall(callId)) return true;
+  return aiPlaybackKind.get(callId) === "twiml";
+}
+
 async function handleGraphSilenceTimeout(callId: string): Promise<void> {
   graphSilenceTimers.delete(callId);
+  if (shouldDeferForAiPlayback(callId)) {
+    deferGraphSilenceUntilAiDone(callId);
+    return;
+  }
+
   const session = activeSessions.get(callId);
   if (session?.session.mode !== "graph") return;
   const listenId = getListenCheckpoint(session.session.engine);
@@ -196,6 +457,21 @@ export function maybeScheduleGraphSilenceForCall(callId: string): void {
   }
 }
 
+/** Wait for AI speech to finish, then start the customer-silence countdown. */
+export function scheduleGraphSilenceAfterPlayback(
+  callId: string,
+  playbackMs: number,
+  kind: AiPlaybackKind = "stream",
+): void {
+  if (playbackMs <= 0) {
+    clearAiPlayback(callId);
+    maybeScheduleGraphSilenceForCall(callId);
+    return;
+  }
+  markAiPlayback(callId, playbackMs, kind);
+  deferGraphSilenceUntilAiDone(callId);
+}
+
 function scheduleStagedSilence(callId: string, sec?: number): void {
   clearStagedSilence(callId);
   if (!sec || sec <= 0) return;
@@ -222,6 +498,7 @@ async function buildChannelContext(channelName?: string): Promise<string | undef
 async function buildProductContext(
   intentId: string,
   entities?: { channel?: string; packet?: string },
+  options?: { conversation?: boolean },
 ): Promise<{
   channelContext?: string;
   packetContext?: string;
@@ -231,14 +508,25 @@ async function buildProductContext(
 }> {
   const channelContext = entities?.channel ? await buildChannelContext(entities.channel) : undefined;
   const packetContext = entities?.packet;
+  const fullCatalog = options?.conversation || isProductQaIntent(intentId);
 
-  if (intentId === "ask_internet") {
+  if (intentId === "ask_internet" || fullCatalog) {
     const tiers = await productTools.list_internet_tiers();
-    return {
-      channelContext,
-      packetContext,
-      internetContext: tiers.map((t) => `${t.name}: ${t.downloadMbps} מגה, ${t.priceMonthly} ש״ח`).join("; "),
-    };
+    const internetContext = tiers.map((t) => `${t.name}: ${t.downloadMbps} מגה, ${t.priceMonthly} ש״ח`).join("; ");
+    if (intentId === "ask_internet" && !fullCatalog) {
+      return { channelContext, packetContext, internetContext };
+    }
+    if (fullCatalog) {
+      const router = await productTools.router_rental_info();
+      const optionsData = await productTools.compare_options();
+      return {
+        channelContext,
+        packetContext,
+        internetContext,
+        routerContext: router.summaryHe,
+        optionsContext: JSON.stringify(optionsData),
+      };
+    }
   }
   if (intentId === "ask_router_rental") {
     const router = await productTools.router_rental_info();
@@ -323,6 +611,22 @@ function resolveSpeakPrompt(
   );
 }
 
+async function hangUpAfterSilenceRetries(
+  callId: string,
+  call: CallWithRelations,
+  engine: GraphFlowEngine,
+  ctx: ReturnType<typeof parseGraphContext>,
+): Promise<VoiceTurnResult> {
+  ctx.silenceRetries = 0;
+  clearGraphSilence(callId);
+  const sayText = POLITE_GOODBYE;
+  ctx.lastSpokenText = sayText;
+  await persistGraphTurn(callId, engine, ctx, sayText, "goodbye_polite", {
+    externalCallId: call.externalCallId,
+  });
+  return { sayText, endCall: true, pendingOutcome: "refused" };
+}
+
 async function repeatGraphQuestionAtListen(
   callId: string,
   call: CallWithRelations,
@@ -383,7 +687,7 @@ async function runSideFlowEntry(
   call: CallWithRelations,
   engine: GraphFlowEngine,
   listenId: string,
-  sideFlow: { entryNodeId: string },
+  sideFlow: SideFlowDef,
   ctx: ReturnType<typeof parseGraphContext>,
   classification: Awaited<ReturnType<typeof classifyUtterance>>,
   text: string,
@@ -399,8 +703,10 @@ async function runSideFlowEntry(
     listenNodeId: listenId,
     resumeNodeId: listenId,
     lastSpokenText: stagePrompt,
+    sideFlowId: sideFlow.id,
   };
 
+  const productConversation = isSideFlowProductConversation(graph, sideFlow);
   const speaks = collectSideFlowSpeakNodes(graph, sideFlow.entryNodeId);
   const spokenParts: string[] = [];
   for (let i = 0; i < speaks.length; i++) {
@@ -412,12 +718,17 @@ async function runSideFlowEntry(
       sn.useLlm && i === 0 ? classification.entities : undefined,
       sn.useLlm && i === 0 ? classification.intentId : undefined,
       ctx.variables,
+      { productConversation },
     );
     spokenParts.push(part);
   }
 
   const lastSpeak = speaks[speaks.length - 1];
   let sayText = spokenParts.join(" ");
+  const afterLastEdge = lastSpeak ? graph.edges.find((e) => e.source === lastSpeak.id) : undefined;
+  const afterLastNode = afterLastEdge
+    ? graph.nodes.find((n) => n.id === afterLastEdge.target)
+    : undefined;
 
   if (lastSpeak?.returnsToMain && ctx.mainCheckpoint) {
     engine.currentNodeId = ctx.mainCheckpoint.resumeNodeId;
@@ -425,6 +736,9 @@ async function runSideFlowEntry(
     sayText = `${sayText} ${repeat}`.trim();
     ctx.lastSpokenText = repeat;
     delete ctx.mainCheckpoint;
+  } else if (afterLastNode?.type === "listen") {
+    engine.currentNodeId = afterLastNode.id;
+    ctx.lastSpokenText = spokenParts[spokenParts.length - 1] ?? "";
   } else if (lastSpeak) {
     engine.currentNodeId = lastSpeak.id;
     const edge = engine.getNextAutoEdge(lastSpeak.id);
@@ -432,13 +746,121 @@ async function runSideFlowEntry(
       const next = graph.nodes.find((n) => n.id === edge.target);
       if (next) engine.currentNodeId = next.id;
     }
-    ctx.lastSpokenText = spokenParts[spokenParts.length - 1]!;
+    ctx.lastSpokenText = spokenParts[spokenParts.length - 1] ?? "";
   }
 
   await persistGraphTurn(callId, engine, ctx, sayText, lastSpeak?.id, {
     externalCallId: call.externalCallId,
   });
   return { sayText, endCall: false };
+}
+
+async function processSideFlowTurn(
+  callId: string,
+  call: CallWithRelations,
+  engine: GraphFlowEngine,
+  text: string,
+  classification: Awaited<ReturnType<typeof classifyUtterance>>,
+  ctx: ReturnType<typeof parseGraphContext>,
+  thresholds: Record<string, number>,
+): Promise<VoiceTurnResult | null> {
+  const graph = engine.getGraph();
+  const activeSideFlow = findActiveSideFlow(graph, ctx, engine);
+  if (!activeSideFlow || !ctx.mainCheckpoint) return null;
+
+  const subgraph = collectSideFlowSubgraphNodeIds(graph, activeSideFlow.entryNodeId);
+  const listenId = getListenCheckpoint(engine);
+  if (!listenId || !subgraph.has(listenId)) return null;
+
+  const productConversation = isSideFlowProductConversation(graph, activeSideFlow);
+
+  if (
+    (classification.intentId === "didnt_understand" || classification.intentId === "silence") &&
+    ctx.lastSpokenText
+  ) {
+    const sayText = ctx.lastSpokenText;
+    await persistGraphTurn(callId, engine, ctx, sayText, undefined, {
+      externalCallId: call.externalCallId,
+    });
+    return { sayText, endCall: false };
+  }
+
+  if (isSideFlowExitIntent(classification.intentId)) {
+    const farewell = findSideFlowFarewellSpeak(graph, activeSideFlow.entryNodeId);
+    const spokenParts: string[] = [];
+    if (farewell) {
+      const part = await speakFromNode(
+        farewell,
+        call.contact,
+        undefined,
+        undefined,
+        undefined,
+        ctx.variables,
+      );
+      spokenParts.push(part);
+    }
+    engine.currentNodeId = ctx.mainCheckpoint.resumeNodeId;
+    const repeat = ctx.mainCheckpoint.lastSpokenText;
+    const sayText = [...spokenParts, repeat].filter(Boolean).join(" ").trim();
+    ctx.lastSpokenText = repeat;
+    delete ctx.mainCheckpoint;
+    await persistGraphTurn(callId, engine, ctx, sayText, farewell?.id, {
+      externalCallId: call.externalCallId,
+    });
+    return { sayText, endCall: false };
+  }
+
+  engine.currentNodeId = listenId;
+  engine.advanceFromListen();
+  let node = engine.getCurrentNode();
+  if (node?.type === "intent_route") {
+    node = engine.advanceByClassification(classification, thresholds) ?? undefined;
+  }
+
+  const spokenParts: string[] = [];
+  let lastSpeakNodeId: string | undefined;
+  while (node?.type === "speak" && subgraph.has(node.id)) {
+    lastSpeakNodeId = node.id;
+    const part = await speakFromNode(
+      node,
+      call.contact,
+      node.useLlm ? text : undefined,
+      node.useLlm ? classification.entities : undefined,
+      node.useLlm ? classification.intentId : undefined,
+      ctx.variables,
+      { productConversation },
+    );
+    spokenParts.push(part);
+
+    if (node.returnsToMain && ctx.mainCheckpoint) {
+      engine.currentNodeId = ctx.mainCheckpoint.resumeNodeId;
+      const repeat = ctx.mainCheckpoint.lastSpokenText;
+      const sayText = [...spokenParts, repeat].join(" ").trim();
+      ctx.lastSpokenText = repeat;
+      delete ctx.mainCheckpoint;
+      await persistGraphTurn(callId, engine, ctx, sayText, lastSpeakNodeId, {
+        externalCallId: call.externalCallId,
+      });
+      return { sayText, endCall: false };
+    }
+
+    const edge = engine.getNextAutoEdge(node.id);
+    if (!edge) break;
+    engine.currentNodeId = edge.target;
+    const next = engine.getCurrentNode();
+    if (next?.type === "listen" && subgraph.has(next.id)) {
+      ctx.lastSpokenText = spokenParts[spokenParts.length - 1] ?? "";
+      const sayText = spokenParts.join(" ");
+      await persistGraphTurn(callId, engine, ctx, sayText, lastSpeakNodeId, {
+        externalCallId: call.externalCallId,
+      });
+      return { sayText, endCall: false };
+    }
+    if (next?.type !== "speak") break;
+    node = next;
+  }
+
+  return null;
 }
 
 function restoreMainAfterSideFlow(
@@ -462,6 +884,7 @@ async function speakFromNode(
   entities?: { channel?: string; packet?: string },
   intentId?: string,
   flowVariables?: Record<string, unknown>,
+  options?: { productConversation?: boolean },
 ): Promise<string> {
   const vars = mergeTemplateVars(
     templateVars(contact.firstName, contact.familyName, contact.sex),
@@ -470,7 +893,9 @@ async function speakFromNode(
   let text = resolveTemplate(node.text, vars);
 
   if (node.useLlm) {
-    const productCtx = await buildProductContext(intentId ?? "", entities);
+    const productCtx = await buildProductContext(intentId ?? "", entities, {
+      conversation: options?.productConversation,
+    });
     const isOpening = !userMessage && /opening/i.test(node.id);
     const reply = await generateSalesReply(userMessage ?? text, {
       customerFirstName: contact.firstName,
@@ -508,6 +933,7 @@ export async function recoverStuckContacts(): Promise<void> {
     unregisterBrowserSession(call.id);
     activeSessions.delete(call.id);
     voiceSessionsStarted.delete(call.id);
+    voiceKickoffStarted.delete(call.id);
     logger.info({ callId: call.id }, "Ended stale browser test call");
   }
 
@@ -548,48 +974,6 @@ async function endActiveTestCallsForContact(contactId: string): Promise<void> {
   }
 }
 
-async function preloadOpeningAudio(
-  callId: string,
-  contact: Contact,
-  flow: CallFlow,
-  graph: ReturnType<typeof getPublishedGraphForCall>,
-  startNodeId: string,
-  initialContext: string,
-): Promise<void> {
-  try {
-    let sayText = "שלום.";
-    if (graph) {
-      const engine = createEngineFromGraph(JSON.stringify(graph), startNodeId);
-      const graphContext = parseGraphContext(initialContext);
-      const node = engine.getCurrentNode();
-      if (node?.type === "speak") {
-        sayText = await speakFromNode(
-          node,
-          contact,
-          undefined,
-          undefined,
-          undefined,
-          graphContext.variables,
-        );
-      }
-    } else {
-      const parsed = parseCallFlow(flow);
-      sayText = previewOpeningLine(
-        parsed.openingTemplate,
-        contactFullName(contact.firstName, contact.familyName),
-      );
-    }
-
-    const clipId = await createPlayClip(sayText, { addresseeSex: contact.sex });
-    if (clipId) {
-      preloadedOpeningClips.set(callId, { clipId, sayText });
-      logger.info({ callId }, "Preloaded opening audio before dial");
-    }
-  } catch (err) {
-    logger.warn({ err, callId }, "Opening preload failed — will synthesize on answer");
-  }
-}
-
 export async function startCall(contactId: string) {
   await recoverStuckContacts();
 
@@ -622,17 +1006,47 @@ export async function startCall(contactId: string) {
     const telephonyConfig = await getTelephonyConfig();
     if (telephonyConfig.provider === "twilio") {
       await ensureTwilioWebhookReady();
-      await preloadOpeningAudio(call.id, contact, flow, graph, startStageId, initialContext);
     }
     const provider = await getTelephonyProvider();
-    const dial = await provider.dial(toE164(contact.phone), call.id);
+    if (telephonyConfig.provider === "twilio" && provider.name !== "twilio") {
+      throw new AppError(
+        503,
+        "Twilio מוגדר אך חסרים פרטי התחברות (Account SID, Auth Token, או מספר טלפון).",
+      );
+    }
 
-    await prisma.call.update({
-      where: { id: call.id },
-      data: { externalCallId: dial.externalCallId, status: "ringing" },
-    });
+    const destination = toE164(contact.phone);
+    logger.info(
+      { callId: call.id, provider: provider.name, to: destination },
+      "Placing outbound call now",
+    );
 
-    broadcastCallEvent({ type: "call_status", callId: call.id, status: "ringing" });
+    const dial = await provider.dial(destination, call.id);
+    await markCallRingingIfActive(call.id, dial.externalCallId);
+    logger.info(
+      { callId: call.id, externalCallId: dial.externalCallId, status: dial.status },
+      "Outbound call queued",
+    );
+
+    if (telephonyConfig.provider === "twilio") {
+      void preloadOpeningAudio(
+        call.id,
+        contact,
+        flow,
+        graph,
+        startStageId,
+        initialContext,
+      )
+        .then((openingClip) => {
+          logger.info(
+            { callId: call.id, durationMs: openingClip.durationMs },
+            "Preloaded opening audio",
+          );
+        })
+        .catch((err) => {
+          logger.error({ err, callId: call.id }, "Opening audio preload failed");
+        });
+    }
 
     if (provider.name === "mock") {
       setTimeout(() => void runVoiceSession(call.id), 1500);
@@ -643,6 +1057,8 @@ export async function startCall(contactId: string) {
       include: { contact: true },
     });
   } catch (err) {
+    logger.error({ err, callId: call.id, contactId }, "startCall failed");
+    preloadedOpeningClips.delete(call.id);
     await prisma.call.update({
       where: { id: call.id },
       data: { status: "failed", endedAt: new Date(), outcome: "none" },
@@ -725,6 +1141,7 @@ export async function updateCallStatus(
   if (status === "ended" || status === "failed" || status === "no_answer" || status === "busy") {
     activeSessions.delete(callId);
     voiceSessionsStarted.delete(callId);
+    voiceKickoffStarted.delete(callId);
     clearStagedSilence(callId);
     if (!isTestCall(call.externalCallId)) {
       unregisterBrowserSession(callId);
@@ -779,9 +1196,10 @@ async function runVoiceSession(callId: string) {
   const tts = new TtsSession();
   const session = activeSessions.get(callId);
   if (session) session.tts = tts;
-  await speakOnCall(callId, turn.sayText, tts, {
+  const playbackMs = await speakOnCall(callId, turn.sayText, tts, {
     addresseeSex: call?.contact?.sex,
   });
+  scheduleGraphSilenceAfterPlayback(callId, playbackMs);
 
   if (call?.externalCallId?.startsWith("mock-")) {
     await finalizeCall(callId, "sold");
@@ -910,9 +1328,6 @@ export async function prepareInitialVoiceTurn(
     }
   }
   scheduleStagedSilence(callId, scheduleSilenceSec);
-  if (sessionEngine.mode === "graph") {
-    maybeScheduleGraphSilenceForCall(callId);
-  }
 
   return { sayText, endCall: false };
 }
@@ -920,27 +1335,47 @@ export async function prepareInitialVoiceTurn(
 export async function kickoffInitialVoice(callId: string): Promise<void> {
   try {
     const preloaded = preloadedOpeningClips.get(callId);
-    const openingPlayedInWebhook = Boolean(preloaded);
-    preloadedOpeningClips.delete(callId);
 
     const turn = await prepareInitialVoiceTurn(callId, {
       precomputedSayText: preloaded?.sayText,
     });
+    preloadedOpeningClips.delete(callId);
 
-    if (openingPlayedInWebhook) {
-      logger.info({ callId }, "Opening already queued in answer TwiML — skipping play update");
+    if (turn.endCall) return;
+    if (!turn.sayText.trim()) {
+      scheduleGraphSilenceAfterPlayback(callId, 0);
       return;
     }
 
-    await waitForMediaSession(callId, 8000);
+    const call = await prisma.call.findUnique({
+      where: { id: callId },
+      include: { contact: true },
+    });
+    const ttsOpts = { addresseeSex: call?.contact?.sex };
+    const isTwilio =
+      call?.externalCallId &&
+      !call.externalCallId.startsWith("mock-") &&
+      !isTestCall(call.externalCallId);
 
-    const played = preloaded?.clipId
-      ? await playPreloadedOnTwilioCall(callId, preloaded.clipId, turn.endCall)
-      : await playOnTwilioCall(callId, turn.sayText, turn.endCall);
+    if (isTwilio && hasMediaSession(callId)) {
+      const openingTts = new TtsSession();
+      const session = activeSessions.get(callId);
+      if (session) session.tts = openingTts;
+      const playbackMs = await speakOnCall(callId, turn.sayText, openingTts, ttsOpts);
+      logger.info({ callId, playbackMs }, "Opening streamed on bidirectional media stream");
+      scheduleGraphSilenceAfterPlayback(callId, playbackMs, "stream");
+      await flushPendingCustomerSpeech(callId);
+      return;
+    }
 
-    if (!played && !turn.endCall) {
+    if (!isTwilio) return;
+
+    const played = await playOnTwilioCall(callId, turn.sayText, turn.endCall);
+
+    if (!played.ok) {
       logger.warn({ callId }, "Initial ElevenLabs play failed — call stays connected on hold");
     }
+    scheduleGraphSilenceAfterPlayback(callId, played.durationMs, "twiml");
   } catch (err) {
     logger.error({ err, callId }, "kickoffInitialVoice failed");
   }
@@ -1095,16 +1530,50 @@ async function processGraphTurn(
     ctx.variables = initGraphContext(engine.getGraph()).variables;
   }
 
+  if (classification.intentId !== "silence" && classification.intentId !== "didnt_understand") {
+    ctx.silenceRetries = 0;
+  }
+
+  const listenCheckpoint = getListenCheckpoint(engine);
   if (
-    (classification.intentId === "didnt_understand" || classification.intentId === "silence") &&
-    getListenCheckpoint(engine)
+    (classification.intentId === "silence" || classification.intentId === "didnt_understand") &&
+    listenCheckpoint
   ) {
+    const retries = (ctx.silenceRetries ?? 0) + 1;
+    ctx.silenceRetries = retries;
+    if (retries > GRAPH_SILENCE_MAX_RETRIES) {
+      logger.info({ callId, retries }, "Max silence retries — ending call");
+      return hangUpAfterSilenceRetries(callId, call, engine, ctx);
+    }
     return repeatGraphQuestionAtListen(callId, call, engine, ctx);
   }
 
   const graph = engine.getGraph();
   const listenId = getListenCheckpoint(engine);
+
+  if (
+    listenId &&
+    text.trim() &&
+    (classification.intentId === "greeting_hi" || classification.intentId === "greeting_ack") &&
+    !isMainPathAnswer(graph, listenId, classification, thresholds)
+  ) {
+    return repeatGraphQuestionAtListen(callId, call, engine, ctx);
+  }
+
   const inSideFlow = isInSideFlow(ctx, engine);
+
+  if (inSideFlow && listenId && text.trim()) {
+    const sideResult = await processSideFlowTurn(
+      callId,
+      call,
+      engine,
+      text,
+      classification,
+      ctx,
+      thresholds,
+    );
+    if (sideResult) return sideResult;
+  }
 
   if (!inSideFlow && listenId && text.trim()) {
     const sideFlow = shouldEnterSideFlow(graph, listenId, classification, thresholds);
@@ -1162,7 +1631,11 @@ async function processGraphTurn(
   }
 
   let routedClassification = classification;
-  if (classification.intentId === "provide_address") {
+  const listenNodeAtTurn = engine.getCurrentNode();
+  const activeListenId =
+    listenNodeAtTurn?.type === "listen" ? listenNodeAtTurn.id : listenCheckpoint;
+
+  if (classification.intentId === "provide_address" && activeListenId !== "listen_address") {
     const address =
       (classification.entities as { address?: string }).address ?? text.trim();
     const available = await lookupFiberAvailability(address);
@@ -1192,6 +1665,19 @@ async function processGraphTurn(
   }
   if (node?.type === "decision") {
     node = engine.advanceByDecision(ctx.variables ?? {}) ?? undefined;
+  }
+  if (node?.type === "intent_route" && node.id === "route_fiber") {
+    const address = String(ctx.variables?.CustomerAddress ?? "").trim();
+    if (address) {
+      const available = await lookupFiberAvailability(address);
+      routedClassification = {
+        intentId: available ? "fiber_available" : "fiber_unavailable",
+        confidence: 1,
+        entities: {},
+        classifier: "rule",
+      };
+      node = engine.advanceByClassification(routedClassification, thresholds) ?? undefined;
+    }
   }
 
   let sayText = ctx.lastSpokenText || "אשמח להמשיך לעזור לך.";
@@ -1334,18 +1820,55 @@ async function processLinearTurn(
 }
 
 export async function handleCustomerSpeech(callId: string, text: string) {
-  const session = activeSessions.get(callId);
-  session?.tts?.abort();
-  clearPlayback(callId);
-  stopBrowserPlayback(callId);
-  clearStagedSilence(callId);
-  clearGraphSilence(callId);
+  const prev = speechTurnChains.get(callId) ?? Promise.resolve();
+  const turn = prev.catch(() => {}).then(() => runCustomerSpeechTurn(callId, text));
+  speechTurnChains.set(callId, turn);
+  try {
+    await turn;
+  } finally {
+    if (speechTurnChains.get(callId) === turn) {
+      speechTurnChains.delete(callId);
+    }
+  }
+}
 
+async function runCustomerSpeechTurn(callId: string, text: string) {
+  const callMeta = await prisma.call.findUnique({
+    where: { id: callId },
+    select: { externalCallId: true },
+  });
+  const isTwilio =
+    callMeta?.externalCallId &&
+    !callMeta.externalCallId.startsWith("mock-") &&
+    !isTestCall(callMeta.externalCallId);
+
+  if (!text.trim() && shouldDeferForAiPlayback(callId)) {
+    deferGraphSilenceUntilAiDone(callId);
+    return;
+  }
+
+  clearGraphSilence(callId);
+  clearStagedSilence(callId);
+  const session = activeSessions.get(callId);
+
+  if (isTwilio && !shouldDeferForAiPlayback(callId) && !isStreamingTtsOnCall(callId)) {
+    await interruptTwilioPlay(callId);
+    session?.tts?.abort();
+    clearAiPlayback(callId);
+  } else if (!shouldDeferForAiPlayback(callId) && !isStreamingTtsOnCall(callId)) {
+    session?.tts?.abort();
+    clearPlayback(callId);
+    stopBrowserPlayback(callId);
+    clearAiPlayback(callId);
+  }
+
+  startThinkingFeedback(callId, Boolean(isTwilio));
   let turn: VoiceTurnResult;
   try {
     turn = await processCustomerTurn(callId, text);
   } catch (err) {
     logger.error({ err, callId }, "processCustomerTurn failed");
+    stopThinkingFeedback(callId, Boolean(isTwilio));
     turn = { sayText: "סליחה, אירעה שגיאה. אשמח לנסות שוב.", endCall: false };
   }
 
@@ -1354,13 +1877,27 @@ export async function handleCustomerSpeech(callId: string, text: string) {
     include: { contact: true },
   });
   const ttsOpts = { addresseeSex: call?.contact?.sex };
-  const isTwilio =
-    call?.externalCallId &&
-    !call.externalCallId.startsWith("mock-") &&
-    !isTestCall(call.externalCallId);
+
+  let playbackMs = 0;
+  let playbackKind: AiPlaybackKind = "twiml";
 
   if (isTwilio) {
-    await playOnTwilioCall(callId, turn.sayText, turn.endCall);
+    try {
+      if (turn.sayText.trim()) {
+        const played = await playOnTwilioCall(callId, turn.sayText, turn.endCall);
+        playbackMs = played.durationMs;
+        if (!played.ok) {
+          logger.error({ callId }, "Twilio reply play failed");
+          stopThinkingFeedback(callId, true);
+        }
+      } else {
+        stopThinkingFeedback(callId, true);
+      }
+    } catch (err) {
+      logger.error({ err, callId }, "Twilio reply play failed");
+      stopThinkingFeedback(callId, true);
+    }
+
     if (turn.pendingOutcome !== undefined) {
       if (turn.pendingOutcome === "none") {
         await updateCallStatus(callId, "ended", "none");
@@ -1368,28 +1905,36 @@ export async function handleCustomerSpeech(callId: string, text: string) {
         await finalizeCall(callId, turn.pendingOutcome);
       }
     }
-    if (!turn.endCall) maybeScheduleGraphSilenceForCall(callId);
+    if (!turn.endCall) {
+      scheduleGraphSilenceAfterPlayback(callId, playbackMs, playbackKind);
+      await flushPendingCustomerSpeech(callId);
+    }
     return;
   }
 
-  if (isTestCall(call?.externalCallId)) {
-    if (turn.endCall && turn.pendingOutcome !== undefined) {
-      setBrowserPendingCallEnd(callId, turn.pendingOutcome);
+    if (isTestCall(call?.externalCallId)) {
+      if (turn.endCall && turn.pendingOutcome !== undefined) {
+        setBrowserPendingCallEnd(callId, turn.pendingOutcome);
+      }
+      const played = await speakToBrowser(callId, turn.sayText, false, ttsOpts);
+      if (turn.endCall && turn.pendingOutcome !== undefined && (!played.played || !turn.sayText.trim())) {
+        await completePendingCallEnd(callId);
+      }
+      if (!turn.endCall) {
+        scheduleGraphSilenceAfterPlayback(callId, played.played ? played.durationMs : 0);
+      }
+      return;
     }
-    const played = await speakToBrowser(callId, turn.sayText, false, ttsOpts);
-    if (turn.endCall && turn.pendingOutcome !== undefined && (!played || !turn.sayText.trim())) {
-      await completePendingCallEnd(callId);
+
+    if (turn.endCall) return;
+
+    const replyTts = new TtsSession();
+    const updated = activeSessions.get(callId);
+    if (updated) updated.tts = replyTts;
+    playbackMs = await speakOnCall(callId, turn.sayText, replyTts, ttsOpts);
+    if (!turn.endCall) {
+      scheduleGraphSilenceAfterPlayback(callId, playbackMs);
     }
-    if (!turn.endCall) maybeScheduleGraphSilenceForCall(callId);
-    return;
-  }
-
-  if (turn.endCall) return;
-
-  const replyTts = new TtsSession();
-  const updated = activeSessions.get(callId);
-  if (updated) updated.tts = replyTts;
-  await speakOnCall(callId, turn.sayText, replyTts, ttsOpts);
 }
 
 export async function rewindTestCallStep(callId: string): Promise<{ sayText: string; currentNodeId: string }> {
@@ -1413,21 +1958,17 @@ export async function rewindTestCallStep(callId: string): Promise<{ sayText: str
   await speakToBrowser(callId, result.sayText, false, {
     addresseeSex: call?.contact?.sex,
   });
-  maybeScheduleGraphSilenceForCall(callId);
 
   return { sayText: result.sayText, currentNodeId: result.currentNodeId };
 }
 
 export { canRewindTestCall };
 
-export async function handleBargeIn(callId: string, audioChunk: Buffer) {
-  if (!detectVoiceActivity(audioChunk)) return;
-  const session = activeSessions.get(callId);
-  if (session?.tts && !session.tts.isAborted()) {
-    session.tts.abort();
-    clearPlayback(callId);
-    logger.info({ callId }, "Barge-in: TTS cancelled");
-  }
+export async function handleBargeIn(callId: string, audioChunk: Buffer | null) {
+  if (audioChunk && audioChunk.length > 0 && !detectVoiceActivity(audioChunk)) return;
+  if (!isAiSpeaking(callId)) return;
+  await interruptAiPlayback(callId);
+  logger.info({ callId }, "Barge-in: stopped AI playback to listen");
 }
 
 export async function addTranscript(
@@ -1480,12 +2021,20 @@ export async function hangUpCall(callId: string): Promise<void> {
   const terminal = new Set<CallStatus>(["ended", "failed", "no_answer", "busy"]);
   if (terminal.has(call.status)) return;
 
+  const isTwilio =
+    call?.externalCallId &&
+    !call.externalCallId.startsWith("mock-") &&
+    !isTestCall(call.externalCallId);
+
   stopBrowserPlayback(callId);
+  stopThinkingFeedback(callId, Boolean(isTwilio));
   clearPlayback(callId);
   activeSessions.delete(callId);
   voiceSessionsStarted.delete(callId);
+  voiceKickoffStarted.delete(callId);
   clearStagedSilence(callId);
   clearGraphSilence(callId);
+  clearAiPlayback(callId);
 
   if (isTestCall(call.externalCallId)) {
     disconnectBrowserTestCall(callId);
@@ -1563,12 +2112,30 @@ export async function getActiveCall() {
 registerVoiceHandlers({
   onCustomerSpeech: handleCustomerSpeech,
   onBargeIn: handleBargeIn,
+  isAiPlaybackActive: isAiSpeaking,
 });
 
 registerMediaStreamCallbacks({
   onStreamStart: async (callId) => {
     voiceSessionsStarted.add(callId);
-    logger.info({ callId }, "Twilio media stream ready — Deepgram Hebrew STT active");
+    logger.info({ callId }, "Twilio media stream ready — STT active");
+    if (voiceKickoffStarted.has(callId)) return;
+    voiceKickoffStarted.add(callId);
+    try {
+      const preloaded = peekPreloadedOpening(callId);
+      await prepareInitialVoiceTurn(callId, { precomputedSayText: preloaded?.sayText });
+      preloadedOpeningClips.delete(callId);
+      const remaining = aiPlaybackRemainingMs(callId);
+      if (remaining > 0) {
+        deferGraphSilenceUntilAiDone(callId);
+      } else {
+        maybeScheduleGraphSilenceForCall(callId);
+      }
+    } catch (err) {
+      logger.error({ err, callId }, "voice session setup failed");
+    } finally {
+      await flushPendingCustomerSpeech(callId);
+    }
   },
 });
 
@@ -1586,12 +2153,14 @@ registerBrowserTestHandlers({
     await speakToBrowser(callId, turn.sayText, false, {
       addresseeSex: call?.contact?.sex,
     });
-    maybeScheduleGraphSilenceForCall(callId);
   },
   onSessionEnd: async (callId) => {
     voiceSessionsStarted.delete(callId);
   },
-  onPlaybackIdle: maybeScheduleGraphSilenceForCall,
+  onPlaybackIdle: (callId) => {
+    clearAiPlayback(callId);
+    onAiPlaybackEnded(callId);
+  },
   onPendingCallEnd: async (callId, outcome) => {
     if (outcome === "none") {
       await updateCallStatus(callId, "ended", "none");
